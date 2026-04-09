@@ -1,23 +1,23 @@
 """
 LexEC — Scraper Automático del Registro Oficial del Ecuador
-Corre todos los días a las 7 AM (hora Ecuador) mediante GitHub Actions.
-Usa Google Gemini para clasificar (100% GRATIS — 1500 llamadas/día).
+Usa múltiples métodos para encontrar nuevas ediciones.
 """
 
 import os, re, json, time, requests
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from bs4 import BeautifulSoup
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 GEMINI_KEY   = os.environ["GEMINI_API_KEY"]
 
-HEADERS_HTTP = {
-    "User-Agent": "Mozilla/5.0 (compatible; LexEC-Bot/1.0)",
-    "Accept-Language": "es-EC,es;q=0.9",
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "es-EC,es;q=0.9,en;q=0.8",
 }
 
-# ── Supabase helpers ──────────────────────────────────────
+# ── Supabase ──────────────────────────────────────────────
 
 def sb_get(endpoint, params=None):
     r = requests.get(
@@ -50,75 +50,191 @@ def log(nivel, msg, detalle=None):
     except Exception:
         pass
 
-# ── Scraping del Registro Oficial ────────────────────────
-
-MESES = {
-    "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
-    "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12,
-}
+# ── Búsqueda de ediciones recientes ──────────────────────
 
 def obtener_ediciones():
-    for url in ["https://www.registroficial.gob.ec/registro-oficial/", "https://www.registroficial.gob.ec/"]:
+    """
+    Intenta múltiples métodos para encontrar ediciones recientes.
+    """
+    ediciones = []
+
+    # MÉTODO 1: Buscar en el sitio del RO con múltiples URLs
+    urls = [
+        "https://www.registroficial.gob.ec/registro-oficial/",
+        "https://www.registroficial.gob.ec/component/k2/itemlist/category/1-registro-oficial",
+        "https://www.registroficial.gob.ec/index.php/registro-oficial-web/publicaciones/registro-oficial",
+    ]
+
+    for url in urls:
         try:
-            r = requests.get(url, headers=HEADERS_HTTP, timeout=20)
-            if r.status_code == 200:
-                html = r.text
-                break
-        except Exception:
-            continue
-    else:
-        print("  No se pudo acceder al Registro Oficial.")
-        return []
+            print(f"  Intentando: {url}")
+            r = requests.get(url, headers=HEADERS, timeout=25)
+            if r.status_code == 200 and len(r.text) > 1000:
+                encontradas = parsear_html_ro(r.text)
+                if encontradas:
+                    print(f"  ✓ Método 1 encontró {len(encontradas)} ediciones")
+                    ediciones.extend(encontradas)
+                    break
+        except Exception as e:
+            print(f"  Error en {url}: {e}")
 
+    # MÉTODO 2: Buscar PDFs directamente por número estimado
+    if not ediciones:
+        print("  Intentando método 2: búsqueda por número estimado...")
+        ediciones = buscar_por_numero_estimado()
+
+    # MÉTODO 3: Buscar en Google News / fuentes alternativas
+    if not ediciones:
+        print("  Intentando método 3: fuentes alternativas...")
+        ediciones = buscar_fuentes_alternativas()
+
+    return ediciones
+
+
+def parsear_html_ro(html):
+    """Extrae ediciones del HTML del Registro Oficial."""
     soup = BeautifulSoup(html, "html.parser")
-    ediciones, vistos = [], set()
+    ediciones = []
+    vistos = set()
 
-    for link in soup.find_all("a", href=True):
-        texto = link.get_text(strip=True)
-        href  = link["href"]
+    MESES = {
+        "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
+        "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12,
+    }
 
-        m_num = re.search(r"(?:N[°º.]?\s*)?(\d{3,4})", texto)
-        if not m_num or m_num.group(1) in vistos:
+    # Buscar cualquier link con número de RO
+    for tag in soup.find_all(["a", "h2", "h3", "div", "span", "p"]):
+        texto = tag.get_text(strip=True)
+        href  = tag.get("href", "") if tag.name == "a" else ""
+
+        # Patrón: número de 3-4 dígitos con fecha
+        m_num = re.search(r"\b(\d{3,4})\b", texto)
+        if not m_num:
             continue
 
+        numero = m_num.group(1)
+        if numero in vistos or int(numero) < 100:
+            continue
+
+        # Buscar fecha
         m_fecha = re.search(r"(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})", texto, re.I)
         if not m_fecha:
             continue
+
         try:
-            dia, mes, anio = int(m_fecha.group(1)), MESES.get(m_fecha.group(2).lower(), 0), int(m_fecha.group(3))
-            if not mes or not (2020 <= anio <= 2030):
+            dia  = int(m_fecha.group(1))
+            mes  = MESES.get(m_fecha.group(2).lower(), 0)
+            anio = int(m_fecha.group(3))
+            if not mes or not (2024 <= anio <= 2030):
                 continue
             fecha = date(anio, mes, dia)
         except Exception:
             continue
 
-        numero = m_num.group(1)
-        tipo   = "suplemento" if "suplemento" in texto.lower() else ("especial" if "especial" in texto.lower() else "ordinario")
+        tipo   = "suplemento" if "suplemento" in texto.lower() else "ordinario"
         num_ro = f"RO-S N° {numero}" if tipo == "suplemento" else f"RO N° {numero}"
-        url_c  = href if href.startswith("http") else f"https://www.registroficial.gob.ec{href}"
+        url_c  = href if href.startswith("http") else (f"https://www.registroficial.gob.ec{href}" if href else "")
 
-        ediciones.append({"numero": num_ro, "tipo": tipo, "fecha": str(fecha), "url": url_c, "url_pdf": None})
+        ediciones.append({
+            "numero": num_ro,
+            "tipo": tipo,
+            "fecha": str(fecha),
+            "url": url_c,
+            "url_pdf": None,
+        })
         vistos.add(numero)
 
-    print(f"  {len(ediciones)} ediciones encontradas.")
     return ediciones
 
-def extraer_texto_pdf(url_pdf):
-    try:
-        import fitz
-        r = requests.get(url_pdf, headers=HEADERS_HTTP, timeout=30)
-        r.raise_for_status()
-        with open("/tmp/norma.pdf", "wb") as f:
-            f.write(r.content)
-        doc   = fitz.open("/tmp/norma.pdf")
-        texto = "".join(p.get_text("text") for p in doc)
-        doc.close()
-        return texto.strip() if len(texto.strip()) > 100 else None
-    except Exception as e:
-        print(f"    PDF error: {e}")
-        return None
 
-# ── Clasificador con Google Gemini (GRATIS) ───────────────
+def buscar_por_numero_estimado():
+    """
+    Estima el número de la edición de hoy basándose en el último número conocido
+    y lo busca directamente en el servidor del RO.
+    """
+    ediciones = []
+    hoy = date.today()
+
+    # El RO publica aprox 250 ediciones por año
+    # RO N° 1 fue en 1895, estimamos el número actual
+    # En 2024 estaban alrededor del N° 600-700
+    # Intentamos los últimos 5 números posibles
+    anio_actual = hoy.year
+    numero_estimado_base = 400 + (anio_actual - 2020) * 250
+
+    urls_base = [
+        "https://www.registroficial.gob.ec/index.php/registro-oficial-web/publicaciones/suplementos/item/",
+        "https://www.registroficial.gob.ec/index.php/registro-oficial-web/publicaciones/registro-oficial/item/",
+    ]
+
+    for num in range(numero_estimado_base, numero_estimado_base + 10):
+        for base in urls_base:
+            try:
+                url = f"{base}{num}"
+                r = requests.get(url, headers=HEADERS, timeout=10)
+                if r.status_code == 200 and "registro oficial" in r.text.lower():
+                    soup = BeautifulSoup(r.text, "html.parser")
+                    titulo = soup.find("title")
+                    if titulo:
+                        print(f"  Encontrado: {titulo.get_text()[:60]}")
+                        # Buscar PDF en la página
+                        pdf_url = None
+                        for a in soup.find_all("a", href=True):
+                            if ".pdf" in a["href"].lower():
+                                pdf_url = a["href"] if a["href"].startswith("http") else f"https://www.registroficial.gob.ec{a['href']}"
+                                break
+                        tipo   = "suplemento" if "suplemento" in r.url.lower() else "ordinario"
+                        num_ro = f"RO-S N° {num}" if tipo == "suplemento" else f"RO N° {num}"
+                        if not ya_existe(num_ro):
+                            ediciones.append({
+                                "numero": num_ro,
+                                "tipo": tipo,
+                                "fecha": str(hoy),
+                                "url": url,
+                                "url_pdf": pdf_url,
+                            })
+            except Exception:
+                pass
+
+    return ediciones
+
+
+def buscar_fuentes_alternativas():
+    """
+    Busca en fuentes alternativas que indexan el Registro Oficial.
+    """
+    ediciones = []
+    hoy = date.today()
+
+    # Intentar la API de búsqueda del RO si existe
+    try:
+        r = requests.get(
+            "https://www.registroficial.gob.ec/index.php?option=com_k2&view=itemlist&format=json&limit=5&ordering=newest",
+            headers=HEADERS, timeout=15,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            items = data.get("items", [])
+            for item in items:
+                titulo = item.get("title", "")
+                m_num = re.search(r"\b(\d{3,4})\b", titulo)
+                if m_num:
+                    num_ro = f"RO N° {m_num.group(1)}"
+                    if not ya_existe(num_ro):
+                        ediciones.append({
+                            "numero": num_ro,
+                            "tipo": "ordinario",
+                            "fecha": str(hoy),
+                            "url": item.get("link", ""),
+                            "url_pdf": None,
+                        })
+    except Exception as e:
+        print(f"  API alternativa falló: {e}")
+
+    return ediciones
+
+
+# ── Clasificador Gemini ───────────────────────────────────
 
 JERARQUIAS = ["Constitución","Tratado Internacional","Ley Orgánica","Ley Ordinaria",
               "Decreto Ejecutivo","Decreto Ley","Reglamento","Ordenanza",
@@ -151,7 +267,8 @@ JSON:
     try:
         r = requests.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
-            json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": 0.1, "maxOutputTokens": 800}},
+            json={"contents": [{"parts": [{"text": prompt}]}],
+                  "generationConfig": {"temperature": 0.1, "maxOutputTokens": 800}},
             timeout=30,
         )
         r.raise_for_status()
@@ -159,28 +276,30 @@ JSON:
         raw = re.sub(r"```(?:json)?|```", "", raw).strip()
         d   = json.loads(raw)
 
-        if d.get("jerarquia") not in JERARQUIAS:
-            d["jerarquia"] = _map_jerarquia(d.get("jerarquia", "")) or "Otro"
-        if d.get("vigencia") not in VIGENCIAS:
-            d["vigencia"] = "Vigente"
-        if d.get("tematica") not in TEMATICAS:
-            d["tematica"] = "Otro"
+        if d.get("jerarquia") not in JERARQUIAS: d["jerarquia"] = "Otro"
+        if d.get("vigencia")  not in VIGENCIAS:  d["vigencia"]  = "Vigente"
+        if d.get("tematica")  not in TEMATICAS:  d["tematica"]  = "Otro"
         return d
     except Exception as e:
         print(f"    Gemini error: {e}")
         return None
 
-def _map_jerarquia(t):
-    if not t: return None
-    t = t.lower()
-    for k, v in [("ley orgánica","Ley Orgánica"),("ley organica","Ley Orgánica"),
-                 ("ley ordinaria","Ley Ordinaria"),("decreto ejecutivo","Decreto Ejecutivo"),
-                 ("decreto ley","Decreto Ley"),("reglamento","Reglamento"),
-                 ("ordenanza","Ordenanza"),("resolución","Resolución"),("resolucion","Resolución"),
-                 ("acuerdo ministerial","Acuerdo Ministerial"),("circular","Circular"),
-                 ("instructivo","Instructivo"),("constitución","Constitución"),("constitucion","Constitución")]:
-        if k in t: return v
-    return None
+
+def extraer_texto_pdf(url_pdf):
+    try:
+        import fitz
+        r = requests.get(url_pdf, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        with open("/tmp/norma.pdf", "wb") as f:
+            f.write(r.content)
+        doc   = fitz.open("/tmp/norma.pdf")
+        texto = "".join(p.get_text("text") for p in doc)
+        doc.close()
+        return texto.strip() if len(texto.strip()) > 100 else None
+    except Exception as e:
+        print(f"    PDF error: {e}")
+        return None
+
 
 def extraer_arts(texto, n=5):
     arts = []
@@ -188,6 +307,7 @@ def extraer_arts(texto, n=5):
         arts.append(f"Art. {m.group(1)}: {m.group(2).strip()}")
         if len(arts) >= n: break
     return arts
+
 
 def separar_normas(texto):
     partes = re.split(
@@ -197,7 +317,6 @@ def separar_normas(texto):
     )
     return [p.strip() for p in partes if len(p.strip()) >= 200]
 
-# ── Pipeline ──────────────────────────────────────────────
 
 def procesar_edicion(ed):
     if ya_existe(ed["numero"]):
@@ -212,7 +331,7 @@ def procesar_edicion(ed):
 
     if not texto and ed.get("url"):
         try:
-            r    = requests.get(ed["url"], headers=HEADERS_HTTP, timeout=20)
+            r    = requests.get(ed["url"], headers=HEADERS, timeout=20)
             soup = BeautifulSoup(r.text, "html.parser")
             for a in soup.find_all("a", href=True):
                 if ".pdf" in a["href"].lower() or "download" in a["href"].lower():
@@ -225,7 +344,7 @@ def procesar_edicion(ed):
             print(f"    Error buscando PDF: {e}")
 
     if not texto:
-        print(f"    Sin texto.")
+        print(f"    Sin texto para {ed['numero']}.")
         log("WARNING", f"Sin texto para {ed['numero']}")
         return 0
 
@@ -234,10 +353,11 @@ def procesar_edicion(ed):
 
     guardadas = 0
     for i, seg in enumerate(segmentos, 1):
-        print(f"    Clasificando {i}/{len(segmentos)}...")
-        c = clasificar(seg) or {"titulo": f"Norma {ed['numero']} seg.{i}", "jerarquia": "Otro", "vigencia": "Vigente", "tematica": "Otro", "sumario": seg[:300]}
-        arts = extraer_arts(seg)
-
+        c = clasificar(seg) or {
+            "titulo": f"Norma {ed['numero']} seg.{i}",
+            "jerarquia": "Otro", "vigencia": "Vigente",
+            "tematica": "Otro", "sumario": seg[:300],
+        }
         norma = {
             "titulo":       c.get("titulo") or f"Norma {ed['numero']}",
             "numero_ro":    ed["numero"],
@@ -249,7 +369,7 @@ def procesar_edicion(ed):
             "fecha_pub":    c.get("fecha_pub") or ed["fecha"],
             "url_pdf":      ed.get("url_pdf"),
             "sumario":      c.get("sumario"),
-            "articulos":    arts or None,
+            "articulos":    extraer_arts(seg) or None,
             "metodo_ocr":   "automatico",
         }
         try:
@@ -262,7 +382,6 @@ def procesar_edicion(ed):
 
     return guardadas
 
-# ── Main ──────────────────────────────────────────────────
 
 def main():
     inicio = datetime.now()
@@ -270,8 +389,11 @@ def main():
     log("INFO", f"Iniciado — {inicio.strftime('%Y-%m-%d %H:%M')}")
 
     ediciones = obtener_ediciones()
+
     if not ediciones:
-        log("INFO", "Sin ediciones nuevas")
+        msg = "No se encontraron ediciones nuevas en el RO hoy."
+        print(msg)
+        log("INFO", msg)
         return
 
     total = 0
@@ -286,6 +408,7 @@ def main():
     msg = f"Completado: {total} normas nuevas en {seg}s"
     print(f"\n{msg}")
     log("INFO", msg, {"normas_nuevas": total, "segundos": seg})
+
 
 if __name__ == "__main__":
     main()
