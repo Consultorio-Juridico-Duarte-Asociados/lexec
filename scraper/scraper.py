@@ -1,10 +1,11 @@
 """
-LexEC — Scraper con Playwright (navegador real)
-Bypasea la protección de Cloudflare del Registro Oficial.
+LexEC — Scraper con Playwright
+Versión con debug para ver la estructura real del sitio.
 """
 import os, re, json, time, requests
 from datetime import date, datetime
 from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
@@ -48,19 +49,31 @@ def log(nivel, msg, detalle=None):
     except Exception:
         pass
 
-# ── Scraping con Playwright (navegador real) ──────────────
+# ── Extrae fecha de un texto ──────────────────────────────
 
-def obtener_ediciones_playwright():
-    """
-    Usa un navegador real (Chromium) para cargar el Registro Oficial
-    y extraer las ediciones recientes. Bypasea Cloudflare/JS.
-    """
+def extraer_fecha(texto):
+    m = re.search(r"(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})", texto, re.I)
+    if not m:
+        return None
+    try:
+        dia  = int(m.group(1))
+        mes  = MESES.get(m.group(2).lower(), 0)
+        anio = int(m.group(3))
+        if mes and 2020 <= anio <= 2030:
+            return date(anio, mes, dia)
+    except Exception:
+        pass
+    return None
+
+# ── Scraping con Playwright ───────────────────────────────
+
+def obtener_ediciones():
     ediciones = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"],
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
         )
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -69,134 +82,158 @@ def obtener_ediciones_playwright():
         page = context.new_page()
 
         try:
-            print("  Abriendo Registro Oficial con navegador real...")
-            page.goto("https://www.registroficial.gob.ec/registro-oficial/", 
-                     wait_until="networkidle", timeout=30000)
-            page.wait_for_timeout(3000)
+            # ── Cargar página principal ───────────────────
+            print("  Abriendo Registro Oficial...")
+            page.goto(
+                "https://www.registroficial.gob.ec/registro-oficial/",
+                wait_until="networkidle", timeout=30000,
+            )
+            page.wait_for_timeout(2000)
 
             html = page.content()
-            print(f"  Página cargada: {len(html)} caracteres")
+            soup = BeautifulSoup(html, "html.parser")
 
-            # Extraer links de ediciones
-            links = page.query_selector_all("a")
+            # DEBUG: mostrar todos los textos con números de 3-4 dígitos
+            print("\n  === LINKS CON NÚMEROS DETECTADOS ===")
             vistos = set()
+            candidatos = []
 
-            for link in links:
-                try:
-                    texto = link.inner_text().strip()
-                    href  = link.get_attribute("href") or ""
+            for tag in soup.find_all(["a", "h1", "h2", "h3", "h4", "li", "p", "span", "div"]):
+                texto = tag.get_text(" ", strip=True)
+                href  = tag.get("href", "") if tag.name == "a" else ""
 
-                    m_num = re.search(r"\b(\d{3,4})\b", texto)
-                    if not m_num or m_num.group(1) in vistos:
-                        continue
-
-                    m_fecha = re.search(
-                        r"(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})", texto, re.I
-                    )
-                    if not m_fecha:
-                        continue
-
-                    dia  = int(m_fecha.group(1))
-                    mes  = MESES.get(m_fecha.group(2).lower(), 0)
-                    anio = int(m_fecha.group(3))
-                    if not mes or not (2023 <= anio <= 2030):
-                        continue
-
-                    numero = m_num.group(1)
-                    fecha  = date(anio, mes, dia)
-                    tipo   = "suplemento" if "suplemento" in texto.lower() else "ordinario"
-                    num_ro = f"RO-S N° {numero}" if tipo == "suplemento" else f"RO N° {numero}"
-                    url_c  = href if href.startswith("http") else f"https://www.registroficial.gob.ec{href}"
-
-                    ediciones.append({
-                        "numero": num_ro, "tipo": tipo,
-                        "fecha": str(fecha), "url": url_c, "url_pdf": None,
-                    })
-                    vistos.add(numero)
-                    print(f"  Encontrada: {num_ro} del {fecha}")
-
-                except Exception:
+                # Buscar número de RO
+                m_num = re.search(r"(?:N[°º.]?\s*)?(\d{3,4})", texto)
+                if not m_num:
                     continue
 
-            # Si no encontró nada, intentar navegar a la sección de publicaciones
-            if not ediciones:
-                print("  Intentando sección de publicaciones...")
-                page.goto("https://www.registroficial.gob.ec/index.php/registro-oficial-web/publicaciones/registro-oficial",
-                         wait_until="networkidle", timeout=30000)
-                page.wait_for_timeout(3000)
+                numero = m_num.group(1)
+                if numero in vistos or int(numero) < 100:
+                    continue
 
-                links = page.query_selector_all("a[href*='item']")
-                for link in links[:20]:
+                # Debe tener fecha o la palabra "registro"
+                tiene_fecha   = bool(re.search(r"\d{1,2}\s+de\s+\w+\s+de\s+\d{4}", texto, re.I))
+                tiene_ro      = bool(re.search(r"registro\s*oficial|suplemento|edici[oó]n", texto, re.I))
+                tiene_enlace  = bool(href)
+
+                if tiene_fecha or (tiene_ro and tiene_enlace):
+                    print(f"  [{numero}] '{texto[:80]}' | href={href[:60]}")
+                    candidatos.append({
+                        "numero": numero,
+                        "texto": texto,
+                        "href": href,
+                    })
+                    vistos.add(numero)
+
+            print(f"\n  Total candidatos: {len(candidatos)}")
+
+            # ── Procesar candidatos ───────────────────────
+            for c in candidatos:
+                numero = c["numero"]
+                texto  = c["texto"]
+                href   = c["href"]
+
+                fecha = extraer_fecha(texto)
+                if not fecha:
+                    fecha = date.today()
+
+                tipo   = "suplemento" if "suplemento" in texto.lower() else "ordinario"
+                num_ro = f"RO-S N° {numero}" if tipo == "suplemento" else f"RO N° {numero}"
+
+                if ya_existe(num_ro):
+                    print(f"  [{num_ro}] Ya existe.")
+                    continue
+
+                url_c = href if href.startswith("http") else (
+                    f"https://www.registroficial.gob.ec{href}" if href else ""
+                )
+
+                # Buscar PDF en la página de la edición
+                url_pdf = None
+                if url_c:
                     try:
-                        texto = link.inner_text().strip()
-                        href  = link.get_attribute("href") or ""
-                        m_num = re.search(r"\b(\d{3,4})\b", texto)
-                        if m_num and href and m_num.group(1) not in vistos:
-                            # Visitar cada página para obtener la fecha y PDF
-                            sub_page = context.new_page()
-                            try:
-                                url_item = href if href.startswith("http") else f"https://www.registroficial.gob.ec{href}"
-                                sub_page.goto(url_item, wait_until="domcontentloaded", timeout=15000)
-                                sub_page.wait_for_timeout(1500)
+                        sub = context.new_page()
+                        sub.goto(url_c, wait_until="domcontentloaded", timeout=15000)
+                        sub.wait_for_timeout(1500)
+                        sub_html = sub.content()
+                        sub.close()
 
-                                contenido = sub_page.inner_text("body")
-                                m_fecha = re.search(
-                                    r"(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})", contenido, re.I
-                                )
-                                pdf_links = sub_page.query_selector_all("a[href*='.pdf']")
-                                url_pdf = None
-                                if pdf_links:
-                                    url_pdf = pdf_links[0].get_attribute("href")
-                                    if url_pdf and not url_pdf.startswith("http"):
-                                        url_pdf = f"https://www.registroficial.gob.ec{url_pdf}"
+                        sub_soup = BeautifulSoup(sub_html, "html.parser")
+                        for a in sub_soup.find_all("a", href=True):
+                            if ".pdf" in a["href"].lower():
+                                url_pdf = a["href"]
+                                if not url_pdf.startswith("http"):
+                                    url_pdf = f"https://www.registroficial.gob.ec{url_pdf}"
+                                print(f"    PDF encontrado: {url_pdf[:60]}")
+                                break
+                    except Exception as e:
+                        print(f"    Error buscando PDF: {e}")
 
-                                if m_fecha:
-                                    dia  = int(m_fecha.group(1))
-                                    mes  = MESES.get(m_fecha.group(2).lower(), 0)
-                                    anio = int(m_fecha.group(3))
-                                    if mes and 2023 <= anio <= 2030:
-                                        numero = m_num.group(1)
-                                        fecha  = date(anio, mes, dia)
-                                        tipo   = "suplemento" if "suplemento" in texto.lower() else "ordinario"
-                                        num_ro = f"RO-S N° {numero}" if tipo == "suplemento" else f"RO N° {numero}"
-                                        ediciones.append({
-                                            "numero": num_ro, "tipo": tipo,
-                                            "fecha": str(fecha), "url": url_item, "url_pdf": url_pdf,
-                                        })
-                                        vistos.add(numero)
-                                        print(f"  Encontrada: {num_ro} del {fecha}")
-                            except Exception as e:
-                                print(f"    Sub-página error: {e}")
-                            finally:
-                                sub_page.close()
-                    except Exception:
-                        continue
+                ediciones.append({
+                    "numero": num_ro, "tipo": tipo,
+                    "fecha": str(fecha), "url": url_c, "url_pdf": url_pdf,
+                })
+                print(f"  ✓ Edición nueva: {num_ro} del {fecha}")
+
+            # ── Si no encontró nada, intentar URL de suplementos ──
+            if not ediciones:
+                print("\n  Intentando sección de suplementos...")
+                page.goto(
+                    "https://www.registroficial.gob.ec/index.php/registro-oficial-web/publicaciones/suplementos",
+                    wait_until="networkidle", timeout=30000,
+                )
+                page.wait_for_timeout(2000)
+
+                html2 = page.content()
+                soup2 = BeautifulSoup(html2, "html.parser")
+
+                for a in soup2.find_all("a", href=True):
+                    texto = a.get_text(strip=True)
+                    href  = a["href"]
+                    m_num = re.search(r"\b(\d{3,4})\b", texto)
+                    fecha = extraer_fecha(texto)
+
+                    if m_num and fecha and m_num.group(1) not in vistos:
+                        numero = m_num.group(1)
+                        num_ro = f"RO-S N° {numero}"
+                        url_c  = href if href.startswith("http") else f"https://www.registroficial.gob.ec{href}"
+                        print(f"  Suplemento: {num_ro} | {fecha} | {url_c[:50]}")
+
+                        if not ya_existe(num_ro):
+                            ediciones.append({
+                                "numero": num_ro, "tipo": "suplemento",
+                                "fecha": str(fecha), "url": url_c, "url_pdf": None,
+                            })
+                        vistos.add(numero)
 
         except Exception as e:
-            print(f"  Error con Playwright: {e}")
+            print(f"  Error Playwright: {e}")
         finally:
             browser.close()
 
-    print(f"  Total ediciones encontradas: {len(ediciones)}")
+    print(f"\n  Total ediciones nuevas: {len(ediciones)}")
     return ediciones
 
+
+# ── Texto de PDF ──────────────────────────────────────────
 
 def extraer_texto_pdf(url_pdf):
     try:
         import fitz
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        r = requests.get(url_pdf, headers=headers, timeout=30)
+        r = requests.get(url_pdf, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
         r.raise_for_status()
         with open("/tmp/norma.pdf", "wb") as f:
             f.write(r.content)
         doc   = fitz.open("/tmp/norma.pdf")
-        texto = "".join(p.get_text("text") for p in doc)
+        texto = "".join(pg.get_text("text") for pg in doc)
         doc.close()
         return texto.strip() if len(texto.strip()) > 100 else None
     except Exception as e:
         print(f"    PDF error: {e}")
         return None
 
+
+# ── Clasificador Gemini ───────────────────────────────────
 
 JERARQUIAS = ["Constitución","Tratado Internacional","Ley Orgánica","Ley Ordinaria",
               "Decreto Ejecutivo","Decreto Ley","Reglamento","Ordenanza",
@@ -259,12 +296,14 @@ def separar_normas(texto):
     )
     return [p.strip() for p in partes if len(p.strip()) >= 200]
 
+
+# ── Pipeline ──────────────────────────────────────────────
+
 def procesar_edicion(ed):
     if ya_existe(ed["numero"]):
-        print(f"  [{ed['numero']}] Ya existe.")
         return 0
 
-    print(f"  [{ed['numero']}] Procesando ({ed['fecha']})...")
+    print(f"\n  Procesando {ed['numero']} ({ed['fecha']})...")
     texto = None
 
     if ed.get("url_pdf"):
@@ -272,9 +311,7 @@ def procesar_edicion(ed):
 
     if not texto and ed.get("url"):
         try:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            r    = requests.get(ed["url"], headers=headers, timeout=20)
-            from bs4 import BeautifulSoup
+            r    = requests.get(ed["url"], headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
             soup = BeautifulSoup(r.text, "html.parser")
             for a in soup.find_all("a", href=True):
                 if ".pdf" in a["href"].lower():
@@ -284,14 +321,14 @@ def procesar_edicion(ed):
                         ed["url_pdf"] = url_pdf
                         break
         except Exception as e:
-            print(f"    Error buscando PDF: {e}")
+            print(f"    Error: {e}")
 
     if not texto:
         log("WARNING", f"Sin texto para {ed['numero']}")
         return 0
 
     segmentos = separar_normas(texto)
-    print(f"    {len(segmentos)} normas detectadas")
+    print(f"    {len(segmentos)} normas en esta edición")
 
     guardadas = 0
     for i, seg in enumerate(segmentos, 1):
@@ -323,16 +360,19 @@ def procesar_edicion(ed):
         time.sleep(0.4)
     return guardadas
 
+
+# ── Main ──────────────────────────────────────────────────
+
 def main():
     inicio = datetime.now()
     print(f"\n{'='*50}\nLexEC Scraper — {inicio.strftime('%Y-%m-%d %H:%M')}\n{'='*50}\n")
     log("INFO", f"Iniciado — {inicio.strftime('%Y-%m-%d %H:%M')}")
 
-    ediciones = obtener_ediciones_playwright()
+    ediciones = obtener_ediciones()
 
     if not ediciones:
         msg = "No se encontraron ediciones nuevas hoy."
-        print(msg)
+        print(f"\n{msg}")
         log("INFO", msg)
         return
 
