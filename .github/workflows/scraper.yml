@@ -7,7 +7,7 @@ on:
 
 jobs:
   scraper:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
       - name: Descargar el código
@@ -23,8 +23,7 @@ jobs:
 
       - name: Instalar Playwright y Chromium
         run: |
-          playwright install chromium
-          playwright install-deps chromium
+          playwright install chromium --with-deps
 
       - name: Ejecutar el scraper
         env:
