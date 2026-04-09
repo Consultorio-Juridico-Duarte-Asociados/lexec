@@ -1,10 +1,10 @@
 """
-LexEC — Scraper con Playwright
-Versión con debug para ver la estructura real del sitio.
+LexEC — Scraper via API JSON del Registro Oficial
+El RO expone una API Joomla/K2 que devuelve las ediciones en JSON.
+No requiere JavaScript ni navegador.
 """
 import os, re, json, time, requests
 from datetime import date, datetime
-from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -14,6 +14,13 @@ GEMINI_KEY   = os.environ["GEMINI_API_KEY"]
 MESES = {
     "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
     "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12,
+}
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json, text/html, */*",
+    "Accept-Language": "es-EC,es;q=0.9",
+    "Referer": "https://www.registroficial.gob.ec/",
 }
 
 # ── Supabase ──────────────────────────────────────────────
@@ -49,25 +56,143 @@ def log(nivel, msg, detalle=None):
     except Exception:
         pass
 
-# ── Extrae fecha de un texto ──────────────────────────────
+# ── Obtener ediciones por API JSON ────────────────────────
 
-def extraer_fecha(texto):
-    m = re.search(r"(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})", texto, re.I)
-    if not m:
-        return None
-    try:
-        dia  = int(m.group(1))
-        mes  = MESES.get(m.group(2).lower(), 0)
-        anio = int(m.group(3))
-        if mes and 2020 <= anio <= 2030:
-            return date(anio, mes, dia)
-    except Exception:
-        pass
-    return None
-
-# ── Scraping con Playwright ───────────────────────────────
+# URLs de la API K2/Joomla del Registro Oficial
+API_URLS = [
+    # API de items recientes — categorías del RO
+    "https://www.registroficial.gob.ec/index.php?option=com_k2&view=itemlist&format=json&limit=10&ordering=newest&task=category&id=1",
+    "https://www.registroficial.gob.ec/index.php?option=com_k2&view=itemlist&format=json&limit=10&ordering=newest",
+    # API de búsqueda
+    "https://www.registroficial.gob.ec/index.php?option=com_k2&view=itemlist&format=json&limit=10&tag=registro+oficial",
+    # Feed RSS del sitio
+    "https://www.registroficial.gob.ec/index.php?format=feed&type=rss",
+    "https://www.registroficial.gob.ec/index.php?option=com_content&view=category&id=1&format=feed&type=rss",
+]
 
 def obtener_ediciones():
+    ediciones = []
+    encontradas_ids = set()
+
+    # ── Método 1: APIs JSON ───────────────────────────────
+    for url in API_URLS:
+        try:
+            print(f"  Probando: {url[:70]}")
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            ct = r.headers.get("content-type", "")
+
+            if "json" in ct and r.status_code == 200:
+                data = r.json()
+                items = data.get("items", data.get("rows", []))
+                print(f"  → JSON con {len(items)} items")
+                for item in items:
+                    ed = parsear_item_json(item)
+                    if ed and ed["numero"] not in encontradas_ids:
+                        ediciones.append(ed)
+                        encontradas_ids.add(ed["numero"])
+                if items:
+                    break
+
+            elif "rss" in ct or "xml" in ct or r.text.strip().startswith("<?xml"):
+                print(f"  → RSS/XML")
+                eds = parsear_rss(r.text)
+                for ed in eds:
+                    if ed["numero"] not in encontradas_ids:
+                        ediciones.append(ed)
+                        encontradas_ids.add(ed["numero"])
+                if eds:
+                    break
+            else:
+                print(f"  → HTML (status {r.status_code}, {len(r.text)} chars)")
+
+        except Exception as e:
+            print(f"  Error: {e}")
+
+    # ── Método 2: Playwright como último recurso ──────────
+    if not ediciones:
+        print("\n  Usando Playwright con scroll...")
+        ediciones = obtener_con_playwright_scroll(encontradas_ids)
+
+    print(f"\n  Total ediciones nuevas encontradas: {len(ediciones)}")
+    return ediciones
+
+
+def parsear_item_json(item):
+    """Parsea un item de la API JSON del RO."""
+    titulo = item.get("title", "") or item.get("name", "")
+    url    = item.get("link", "") or item.get("url", "")
+    fecha_str = item.get("created", "") or item.get("date", "")
+
+    m_num = re.search(r"\b(\d{3,4})\b", titulo)
+    if not m_num:
+        return None
+
+    numero = m_num.group(1)
+    tipo   = "suplemento" if "suplemento" in titulo.lower() else "ordinario"
+    num_ro = f"RO-S N° {numero}" if tipo == "suplemento" else f"RO N° {numero}"
+
+    # Parsear fecha
+    fecha = date.today()
+    if fecha_str:
+        m_f = re.search(r"(\d{4})-(\d{2})-(\d{2})", fecha_str)
+        if m_f:
+            try:
+                fecha = date(int(m_f.group(1)), int(m_f.group(2)), int(m_f.group(3)))
+            except Exception:
+                pass
+
+    if not url.startswith("http"):
+        url = f"https://www.registroficial.gob.ec{url}"
+
+    return {"numero": num_ro, "tipo": tipo, "fecha": str(fecha), "url": url, "url_pdf": None}
+
+
+def parsear_rss(xml_text):
+    """Parsea un feed RSS del RO."""
+    ediciones = []
+    soup = BeautifulSoup(xml_text, "xml")
+    vistos = set()
+
+    for item in soup.find_all("item"):
+        titulo = item.find("title")
+        link   = item.find("link")
+        pubdate = item.find("pubDate")
+
+        if not titulo:
+            continue
+
+        texto = titulo.get_text(strip=True)
+        m_num = re.search(r"\b(\d{3,4})\b", texto)
+        if not m_num or m_num.group(1) in vistos:
+            continue
+
+        numero = m_num.group(1)
+        tipo   = "suplemento" if "suplemento" in texto.lower() else "ordinario"
+        num_ro = f"RO-S N° {numero}" if tipo == "suplemento" else f"RO N° {numero}"
+        url    = link.get_text(strip=True) if link else ""
+
+        # Fecha del RSS
+        fecha = date.today()
+        if pubdate:
+            m_f = re.search(r"(\d{1,2})\s+(\w{3})\s+(\d{4})", pubdate.get_text())
+            meses_cortos = {"Jan":1,"Feb":2,"Mar":3,"Apr":4,"May":5,"Jun":6,
+                            "Jul":7,"Aug":8,"Sep":9,"Oct":10,"Nov":11,"Dec":12}
+            if m_f:
+                try:
+                    fecha = date(int(m_f.group(3)), meses_cortos.get(m_f.group(2), 1), int(m_f.group(1)))
+                except Exception:
+                    pass
+
+        print(f"  RSS: {num_ro} | {fecha} | {url[:50]}")
+        ediciones.append({"numero": num_ro, "tipo": tipo, "fecha": str(fecha), "url": url, "url_pdf": None})
+        vistos.add(numero)
+
+    return ediciones
+
+
+def obtener_con_playwright_scroll(encontradas_ids):
+    """Última opción: Playwright con scroll para cargar contenido dinámico."""
+    from playwright.sync_api import sync_playwright
     ediciones = []
 
     with sync_playwright() as p:
@@ -76,151 +201,86 @@ def obtener_ediciones():
             args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
         )
         context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            locale="es-EC",
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         )
         page = context.new_page()
 
         try:
-            # ── Cargar página principal ───────────────────
-            print("  Abriendo Registro Oficial...")
-            page.goto(
-                "https://www.registroficial.gob.ec/registro-oficial/",
-                wait_until="networkidle", timeout=30000,
-            )
-            page.wait_for_timeout(2000)
+            page.goto("https://www.registroficial.gob.ec/registro-oficial/",
+                     wait_until="networkidle", timeout=30000)
 
+            # Scroll para cargar contenido lazy
+            for _ in range(5):
+                page.evaluate("window.scrollBy(0, 800)")
+                page.wait_for_timeout(800)
+
+            page.wait_for_timeout(2000)
             html = page.content()
             soup = BeautifulSoup(html, "html.parser")
 
-            # DEBUG: mostrar todos los textos con números de 3-4 dígitos
-            print("\n  === LINKS CON NÚMEROS DETECTADOS ===")
-            vistos = set()
-            candidatos = []
+            # Buscar en TODO el HTML — texto visible e invisible
+            texto_completo = soup.get_text(" ")
+            print(f"  Texto extraído: {len(texto_completo)} chars")
 
-            for tag in soup.find_all(["a", "h1", "h2", "h3", "h4", "li", "p", "span", "div"]):
-                texto = tag.get_text(" ", strip=True)
-                href  = tag.get("href", "") if tag.name == "a" else ""
+            # Buscar todos los patrones de RO
+            patrones = [
+                r"(?:Registro\s+Oficial|RO)\s+(?:N[°º.]?\s*)?(\d{3,4})",
+                r"(?:Suplemento|Sup\.?)\s+(?:al\s+)?(?:RO|Registro\s+Oficial)?\s*(?:N[°º.]?\s*)?(\d{3,4})",
+                r"(?:Edici[oó]n\s+)?(?:N[°º.]?\s*)(\d{3,4})\s*(?:del?\s+\d)",
+            ]
 
-                # Buscar número de RO
-                m_num = re.search(r"(?:N[°º.]?\s*)?(\d{3,4})", texto)
-                if not m_num:
-                    continue
+            vistos = set(encontradas_ids)
+            for patron in patrones:
+                for m in re.finditer(patron, texto_completo, re.I):
+                    numero = m.group(1)
+                    if numero in vistos or int(numero) < 100:
+                        continue
+                    # Extraer contexto alrededor del match
+                    inicio = max(0, m.start() - 100)
+                    fin    = min(len(texto_completo), m.end() + 100)
+                    contexto = texto_completo[inicio:fin]
+                    print(f"  Match: {numero} | contexto: '{contexto[:80]}'")
 
-                numero = m_num.group(1)
-                if numero in vistos or int(numero) < 100:
-                    continue
+                    tipo   = "suplemento" if "suplemento" in contexto.lower() else "ordinario"
+                    num_ro = f"RO-S N° {numero}" if tipo == "suplemento" else f"RO N° {numero}"
 
-                # Debe tener fecha o la palabra "registro"
-                tiene_fecha   = bool(re.search(r"\d{1,2}\s+de\s+\w+\s+de\s+\d{4}", texto, re.I))
-                tiene_ro      = bool(re.search(r"registro\s*oficial|suplemento|edici[oó]n", texto, re.I))
-                tiene_enlace  = bool(href)
-
-                if tiene_fecha or (tiene_ro and tiene_enlace):
-                    print(f"  [{numero}] '{texto[:80]}' | href={href[:60]}")
-                    candidatos.append({
-                        "numero": numero,
-                        "texto": texto,
-                        "href": href,
-                    })
+                    if not ya_existe(num_ro):
+                        ediciones.append({
+                            "numero": num_ro, "tipo": tipo,
+                            "fecha": str(date.today()), "url": "", "url_pdf": None,
+                        })
                     vistos.add(numero)
 
-            print(f"\n  Total candidatos: {len(candidatos)}")
-
-            # ── Procesar candidatos ───────────────────────
-            for c in candidatos:
-                numero = c["numero"]
-                texto  = c["texto"]
-                href   = c["href"]
-
-                fecha = extraer_fecha(texto)
-                if not fecha:
-                    fecha = date.today()
-
-                tipo   = "suplemento" if "suplemento" in texto.lower() else "ordinario"
-                num_ro = f"RO-S N° {numero}" if tipo == "suplemento" else f"RO N° {numero}"
-
-                if ya_existe(num_ro):
-                    print(f"  [{num_ro}] Ya existe.")
-                    continue
-
-                url_c = href if href.startswith("http") else (
-                    f"https://www.registroficial.gob.ec{href}" if href else ""
-                )
-
-                # Buscar PDF en la página de la edición
-                url_pdf = None
-                if url_c:
-                    try:
-                        sub = context.new_page()
-                        sub.goto(url_c, wait_until="domcontentloaded", timeout=15000)
-                        sub.wait_for_timeout(1500)
-                        sub_html = sub.content()
-                        sub.close()
-
-                        sub_soup = BeautifulSoup(sub_html, "html.parser")
-                        for a in sub_soup.find_all("a", href=True):
-                            if ".pdf" in a["href"].lower():
-                                url_pdf = a["href"]
-                                if not url_pdf.startswith("http"):
-                                    url_pdf = f"https://www.registroficial.gob.ec{url_pdf}"
-                                print(f"    PDF encontrado: {url_pdf[:60]}")
-                                break
-                    except Exception as e:
-                        print(f"    Error buscando PDF: {e}")
-
-                ediciones.append({
-                    "numero": num_ro, "tipo": tipo,
-                    "fecha": str(fecha), "url": url_c, "url_pdf": url_pdf,
-                })
-                print(f"  ✓ Edición nueva: {num_ro} del {fecha}")
-
-            # ── Si no encontró nada, intentar URL de suplementos ──
-            if not ediciones:
-                print("\n  Intentando sección de suplementos...")
-                page.goto(
-                    "https://www.registroficial.gob.ec/index.php/registro-oficial-web/publicaciones/suplementos",
-                    wait_until="networkidle", timeout=30000,
-                )
-                page.wait_for_timeout(2000)
-
-                html2 = page.content()
-                soup2 = BeautifulSoup(html2, "html.parser")
-
-                for a in soup2.find_all("a", href=True):
-                    texto = a.get_text(strip=True)
-                    href  = a["href"]
-                    m_num = re.search(r"\b(\d{3,4})\b", texto)
-                    fecha = extraer_fecha(texto)
-
-                    if m_num and fecha and m_num.group(1) not in vistos:
-                        numero = m_num.group(1)
-                        num_ro = f"RO-S N° {numero}"
-                        url_c  = href if href.startswith("http") else f"https://www.registroficial.gob.ec{href}"
-                        print(f"  Suplemento: {num_ro} | {fecha} | {url_c[:50]}")
-
-                        if not ya_existe(num_ro):
-                            ediciones.append({
-                                "numero": num_ro, "tipo": "suplemento",
-                                "fecha": str(fecha), "url": url_c, "url_pdf": None,
-                            })
-                        vistos.add(numero)
-
         except Exception as e:
-            print(f"  Error Playwright: {e}")
+            print(f"  Playwright error: {e}")
         finally:
             browser.close()
 
-    print(f"\n  Total ediciones nuevas: {len(ediciones)}")
     return ediciones
 
 
-# ── Texto de PDF ──────────────────────────────────────────
+# ── Buscar PDF de una edición ─────────────────────────────
+
+def buscar_pdf(url_edicion):
+    """Busca el PDF en la página de una edición."""
+    if not url_edicion:
+        return None
+    try:
+        r    = requests.get(url_edicion, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(r.text, "html.parser")
+        for a in soup.find_all("a", href=True):
+            h = a["href"]
+            if ".pdf" in h.lower() or "download" in h.lower():
+                return h if h.startswith("http") else f"https://www.registroficial.gob.ec{h}"
+    except Exception:
+        pass
+    return None
+
 
 def extraer_texto_pdf(url_pdf):
     try:
         import fitz
-        r = requests.get(url_pdf, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+        r = requests.get(url_pdf, headers=HEADERS, timeout=30)
         r.raise_for_status()
         with open("/tmp/norma.pdf", "wb") as f:
             f.write(r.content)
@@ -296,32 +356,15 @@ def separar_normas(texto):
     )
     return [p.strip() for p in partes if len(p.strip()) >= 200]
 
-
-# ── Pipeline ──────────────────────────────────────────────
-
 def procesar_edicion(ed):
     if ya_existe(ed["numero"]):
         return 0
-
     print(f"\n  Procesando {ed['numero']} ({ed['fecha']})...")
-    texto = None
 
-    if ed.get("url_pdf"):
-        texto = extraer_texto_pdf(ed["url_pdf"])
+    if not ed.get("url_pdf") and ed.get("url"):
+        ed["url_pdf"] = buscar_pdf(ed["url"])
 
-    if not texto and ed.get("url"):
-        try:
-            r    = requests.get(ed["url"], headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-            soup = BeautifulSoup(r.text, "html.parser")
-            for a in soup.find_all("a", href=True):
-                if ".pdf" in a["href"].lower():
-                    url_pdf = a["href"] if a["href"].startswith("http") else f"https://www.registroficial.gob.ec{a['href']}"
-                    texto = extraer_texto_pdf(url_pdf)
-                    if texto:
-                        ed["url_pdf"] = url_pdf
-                        break
-        except Exception as e:
-            print(f"    Error: {e}")
+    texto = extraer_texto_pdf(ed["url_pdf"]) if ed.get("url_pdf") else None
 
     if not texto:
         log("WARNING", f"Sin texto para {ed['numero']}")
@@ -349,7 +392,7 @@ def procesar_edicion(ed):
             "url_pdf":      ed.get("url_pdf"),
             "sumario":      c.get("sumario"),
             "articulos":    extraer_arts(seg) or None,
-            "metodo_ocr":   "playwright",
+            "metodo_ocr":   "automatico",
         }
         try:
             sb_insert("normas", norma)
@@ -361,15 +404,12 @@ def procesar_edicion(ed):
     return guardadas
 
 
-# ── Main ──────────────────────────────────────────────────
-
 def main():
     inicio = datetime.now()
     print(f"\n{'='*50}\nLexEC Scraper — {inicio.strftime('%Y-%m-%d %H:%M')}\n{'='*50}\n")
     log("INFO", f"Iniciado — {inicio.strftime('%Y-%m-%d %H:%M')}")
 
     ediciones = obtener_ediciones()
-
     if not ediciones:
         msg = "No se encontraron ediciones nuevas hoy."
         print(f"\n{msg}")
