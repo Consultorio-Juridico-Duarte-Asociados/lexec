@@ -1,9 +1,10 @@
 """
-LexEC — Scraper via API JSON del Registro Oficial
-El RO expone una API Joomla/K2 que devuelve las ediciones en JSON.
-No requiere JavaScript ni navegador.
+LexEC — Scraper de Leyes Aprobadas
+Fuente: leyes.asambleanacional.gob.ec
+Descarga solo leyes con estado "Publicado" (en el Registro Oficial).
+Corre todos los días a las 7 AM (Ecuador) via GitHub Actions.
 """
-import os, re, json, time, requests
+import os, re, json, time, requests, csv, io
 from datetime import date, datetime
 from bs4 import BeautifulSoup
 
@@ -11,16 +12,13 @@ SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 GEMINI_KEY   = os.environ["GEMINI_API_KEY"]
 
-MESES = {
-    "enero":1,"febrero":2,"marzo":3,"abril":4,"mayo":5,"junio":6,
-    "julio":7,"agosto":8,"septiembre":9,"octubre":10,"noviembre":11,"diciembre":12,
-}
+ASAMBLEA_URL = "https://leyes.asambleanacional.gob.ec/"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json, text/html, */*",
+    "Accept": "text/html,application/xhtml+xml,*/*",
     "Accept-Language": "es-EC,es;q=0.9",
-    "Referer": "https://www.registroficial.gob.ec/",
+    "Referer": "https://leyes.asambleanacional.gob.ec/",
 }
 
 # ── Supabase ──────────────────────────────────────────────
@@ -38,396 +36,425 @@ def sb_insert(tabla, datos):
     r = requests.post(
         f"{SUPABASE_URL}/rest/v1/{tabla}",
         headers={
-            "apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json", "Prefer": "return=representation",
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
         },
         json=datos, timeout=15,
     )
     r.raise_for_status()
     return r.json()
 
-def ya_existe(numero_ro):
-    data = sb_get("normas", params={"numero_ro": f"eq.{numero_ro}", "select": "id", "limit": 1})
+def ya_existe(titulo):
+    """Verifica si una ley con ese título ya está guardada."""
+    # Buscar por los primeros 80 caracteres del título
+    titulo_corto = titulo[:80]
+    data = sb_get("normas", params={
+        "titulo": f"ilike.*{titulo_corto[:40]}*",
+        "select": "id",
+        "limit": 1,
+    })
     return len(data) > 0
 
 def log(nivel, msg, detalle=None):
     try:
-        sb_insert("scraper_logs", {"nivel": nivel, "mensaje": msg, "detalle": detalle})
+        sb_insert("scraper_logs", {
+            "nivel": nivel, "mensaje": msg, "detalle": detalle
+        })
     except Exception:
         pass
 
-# ── Obtener ediciones por API JSON ────────────────────────
+# ── Obtener leyes publicadas de la Asamblea ───────────────
 
-# URLs de la API K2/Joomla del Registro Oficial
-API_URLS = [
-    # API de items recientes — categorías del RO
-    "https://www.registroficial.gob.ec/index.php?option=com_k2&view=itemlist&format=json&limit=10&ordering=newest&task=category&id=1",
-    "https://www.registroficial.gob.ec/index.php?option=com_k2&view=itemlist&format=json&limit=10&ordering=newest",
-    # API de búsqueda
-    "https://www.registroficial.gob.ec/index.php?option=com_k2&view=itemlist&format=json&limit=10&tag=registro+oficial",
-    # Feed RSS del sitio
-    "https://www.registroficial.gob.ec/index.php?format=feed&type=rss",
-    "https://www.registroficial.gob.ec/index.php?option=com_content&view=category&id=1&format=feed&type=rss",
-]
+def obtener_leyes_publicadas():
+    """
+    Descarga el listado de leyes con estado 'Publicado'
+    desde leyes.asambleanacional.gob.ec.
+    Usa la exportación CSV del sitio — sin necesidad de Playwright.
+    """
+    leyes = []
 
-def obtener_ediciones():
-    ediciones = []
-    encontradas_ids = set()
+    # El sitio permite exportar todos los registros a CSV
+    # Filtramos por fase = "Publicado" directamente en la URL
+    params_busqueda = {
+        "fase": "Publicado",    # solo leyes publicadas en el RO
+        "exportar": "csv",      # exportar como CSV
+    }
 
-    # ── Método 1: APIs JSON ───────────────────────────────
-    for url in API_URLS:
+    print("  Descargando listado de leyes publicadas de la Asamblea Nacional...")
+
+    # Intentar exportación CSV directa
+    try:
+        r = requests.post(
+            ASAMBLEA_URL,
+            headers=HEADERS,
+            data={
+                "txtFase": "Publicado",
+                "btnBuscar": "Buscar",
+                "exportCSV": "1",
+            },
+            timeout=30,
+        )
+        if r.status_code == 200 and ("Publicado" in r.text or "titulo" in r.text.lower()):
+            leyes = parsear_csv_asamblea(r.text)
+            if leyes:
+                print(f"  CSV directo: {len(leyes)} leyes publicadas")
+                return leyes
+    except Exception as e:
+        print(f"  CSV directo falló: {e}")
+
+    # Si CSV no funcionó, scraping HTML con BeautifulSoup
+    print("  Intentando scraping HTML...")
+    leyes = scraping_html_asamblea()
+    return leyes
+
+
+def scraping_html_asamblea():
+    """
+    Scraping directo del HTML de la Asamblea.
+    El sitio no tiene Cloudflare y responde normalmente.
+    Filtra solo las filas con estado 'Publicado'.
+    """
+    leyes = []
+
+    try:
+        # Buscar solo proyectos publicados
+        r = requests.post(
+            ASAMBLEA_URL,
+            headers=HEADERS,
+            data={
+                "txtFase": "Publicado",
+                "btnBuscar": "Buscar",
+            },
+            timeout=30,
+        )
+        r.raise_for_status()
+        print(f"  HTML recibido: {len(r.text)} caracteres")
+
+    except Exception as e:
+        print(f"  Error accediendo a la Asamblea: {e}")
+        # Intentar GET simple
         try:
-            print(f"  Probando: {url[:70]}")
-            r = requests.get(url, headers=HEADERS, timeout=15)
-            ct = r.headers.get("content-type", "")
+            r = requests.get(ASAMBLEA_URL, headers=HEADERS, timeout=30)
+            r.raise_for_status()
+        except Exception as e2:
+            print(f"  GET también falló: {e2}")
+            return []
 
-            if "json" in ct and r.status_code == 200:
-                data = r.json()
-                items = data.get("items", data.get("rows", []))
-                print(f"  → JSON con {len(items)} items")
-                for item in items:
-                    ed = parsear_item_json(item)
-                    if ed and ed["numero"] not in encontradas_ids:
-                        ediciones.append(ed)
-                        encontradas_ids.add(ed["numero"])
-                if items:
-                    break
+    soup = BeautifulSoup(r.text, "html.parser")
 
-            elif "rss" in ct or "xml" in ct or r.text.strip().startswith("<?xml"):
-                print(f"  → RSS/XML")
-                eds = parsear_rss(r.text)
-                for ed in eds:
-                    if ed["numero"] not in encontradas_ids:
-                        ediciones.append(ed)
-                        encontradas_ids.add(ed["numero"])
-                if eds:
-                    break
-            else:
-                print(f"  → HTML (status {r.status_code}, {len(r.text)} chars)")
+    # Buscar la tabla de resultados
+    tabla = soup.find("table")
+    if not tabla:
+        print("  No se encontró tabla en el HTML")
+        # Mostrar estructura para debug
+        print(f"  Tags encontrados: {[t.name for t in soup.find_all()][:20]}")
+        return []
 
-        except Exception as e:
-            print(f"  Error: {e}")
+    filas = tabla.find_all("tr")
+    print(f"  Filas en tabla: {len(filas)}")
 
-    # ── Método 2: Playwright como último recurso ──────────
-    if not ediciones:
-        print("\n  Usando Playwright con scroll...")
-        ediciones = obtener_con_playwright_scroll(encontradas_ids)
+    for fila in filas[1:]:  # saltar encabezado
+        celdas = fila.find_all(["td", "th"])
+        if len(celdas) < 3:
+            continue
 
-    print(f"\n  Total ediciones nuevas encontradas: {len(ediciones)}")
-    return ediciones
+        # Extraer texto de cada celda
+        textos = [c.get_text(strip=True) for c in celdas]
 
+        # Buscar estado "Publicado" en la fila
+        fila_texto = " ".join(textos).lower()
+        if "publicado" not in fila_texto:
+            continue
 
-def parsear_item_json(item):
-    """Parsea un item de la API JSON del RO."""
-    titulo = item.get("title", "") or item.get("name", "")
-    url    = item.get("link", "") or item.get("url", "")
-    fecha_str = item.get("created", "") or item.get("date", "")
-
-    m_num = re.search(r"\b(\d{3,4})\b", titulo)
-    if not m_num:
-        return None
-
-    numero = m_num.group(1)
-    tipo   = "suplemento" if "suplemento" in titulo.lower() else "ordinario"
-    num_ro = f"RO-S N° {numero}" if tipo == "suplemento" else f"RO N° {numero}"
-
-    # Parsear fecha
-    fecha = date.today()
-    if fecha_str:
-        m_f = re.search(r"(\d{4})-(\d{2})-(\d{2})", fecha_str)
-        if m_f:
-            try:
-                fecha = date(int(m_f.group(1)), int(m_f.group(2)), int(m_f.group(3)))
-            except Exception:
-                pass
-
-    if not url.startswith("http"):
-        url = f"https://www.registroficial.gob.ec{url}"
-
-    return {"numero": num_ro, "tipo": tipo, "fecha": str(fecha), "url": url, "url_pdf": None}
-
-
-def parsear_rss(xml_text):
-    """Parsea un feed RSS del RO."""
-    ediciones = []
-    soup = BeautifulSoup(xml_text, "xml")
-    vistos = set()
-
-    for item in soup.find_all("item"):
-        titulo = item.find("title")
-        link   = item.find("link")
-        pubdate = item.find("pubDate")
+        # Extraer título (generalmente en la segunda columna)
+        titulo = ""
+        for i, texto in enumerate(textos):
+            if len(texto) > 20 and "ley" in texto.lower():
+                titulo = texto
+                break
 
         if not titulo:
-            continue
+            titulo = textos[1] if len(textos) > 1 else textos[0]
 
-        texto = titulo.get_text(strip=True)
-        m_num = re.search(r"\b(\d{3,4})\b", texto)
-        if not m_num or m_num.group(1) in vistos:
-            continue
+        # Extraer fecha
+        fecha_str = None
+        for texto in textos:
+            m = re.search(r"(\d{4}-\d{2}-\d{2})", texto)
+            if m:
+                fecha_str = m.group(1)
+                break
 
-        numero = m_num.group(1)
-        tipo   = "suplemento" if "suplemento" in texto.lower() else "ordinario"
-        num_ro = f"RO-S N° {numero}" if tipo == "suplemento" else f"RO N° {numero}"
-        url    = link.get_text(strip=True) if link else ""
+        # Extraer número de RO si aparece
+        numero_ro = None
+        for texto in textos:
+            m = re.search(r"RO\s*(?:N[°º.]?\s*)?(\d+)", texto, re.I)
+            if m:
+                numero_ro = f"RO N° {m.group(1)}"
+                break
 
-        # Fecha del RSS
-        fecha = date.today()
-        if pubdate:
-            m_f = re.search(r"(\d{1,2})\s+(\w{3})\s+(\d{4})", pubdate.get_text())
-            meses_cortos = {"Jan":1,"Feb":2,"Mar":3,"Apr":4,"May":5,"Jun":6,
-                            "Jul":7,"Aug":8,"Sep":9,"Oct":10,"Nov":11,"Dec":12}
-            if m_f:
-                try:
-                    fecha = date(int(m_f.group(3)), meses_cortos.get(m_f.group(2), 1), int(m_f.group(1)))
-                except Exception:
-                    pass
+        # Buscar link a documentos
+        link = fila.find("a", href=True)
+        url_detalle = ""
+        if link:
+            href = link["href"]
+            url_detalle = href if href.startswith("http") else f"https://leyes.asambleanacional.gob.ec{href}"
 
-        print(f"  RSS: {num_ro} | {fecha} | {url[:50]}")
-        ediciones.append({"numero": num_ro, "tipo": tipo, "fecha": str(fecha), "url": url, "url_pdf": None})
-        vistos.add(numero)
+        if titulo and len(titulo) > 10:
+            leyes.append({
+                "titulo": titulo,
+                "fecha": fecha_str or str(date.today()),
+                "numero_ro": numero_ro,
+                "url": url_detalle,
+            })
+            print(f"  Ley publicada: {titulo[:70]}")
 
-    return ediciones
-
-
-def obtener_con_playwright_scroll(encontradas_ids):
-    """Última opción: Playwright con scroll para cargar contenido dinámico."""
-    from playwright.sync_api import sync_playwright
-    ediciones = []
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-        )
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        )
-        page = context.new_page()
-
-        try:
-            page.goto("https://www.registroficial.gob.ec/registro-oficial/",
-                     wait_until="networkidle", timeout=30000)
-
-            # Scroll para cargar contenido lazy
-            for _ in range(5):
-                page.evaluate("window.scrollBy(0, 800)")
-                page.wait_for_timeout(800)
-
-            page.wait_for_timeout(2000)
-            html = page.content()
-            soup = BeautifulSoup(html, "html.parser")
-
-            # Buscar en TODO el HTML — texto visible e invisible
-            texto_completo = soup.get_text(" ")
-            print(f"  Texto extraído: {len(texto_completo)} chars")
-
-            # Buscar todos los patrones de RO
-            patrones = [
-                r"(?:Registro\s+Oficial|RO)\s+(?:N[°º.]?\s*)?(\d{3,4})",
-                r"(?:Suplemento|Sup\.?)\s+(?:al\s+)?(?:RO|Registro\s+Oficial)?\s*(?:N[°º.]?\s*)?(\d{3,4})",
-                r"(?:Edici[oó]n\s+)?(?:N[°º.]?\s*)(\d{3,4})\s*(?:del?\s+\d)",
-            ]
-
-            vistos = set(encontradas_ids)
-            for patron in patrones:
-                for m in re.finditer(patron, texto_completo, re.I):
-                    numero = m.group(1)
-                    if numero in vistos or int(numero) < 100:
-                        continue
-                    # Extraer contexto alrededor del match
-                    inicio = max(0, m.start() - 100)
-                    fin    = min(len(texto_completo), m.end() + 100)
-                    contexto = texto_completo[inicio:fin]
-                    print(f"  Match: {numero} | contexto: '{contexto[:80]}'")
-
-                    tipo   = "suplemento" if "suplemento" in contexto.lower() else "ordinario"
-                    num_ro = f"RO-S N° {numero}" if tipo == "suplemento" else f"RO N° {numero}"
-
-                    if not ya_existe(num_ro):
-                        ediciones.append({
-                            "numero": num_ro, "tipo": tipo,
-                            "fecha": str(date.today()), "url": "", "url_pdf": None,
-                        })
-                    vistos.add(numero)
-
-        except Exception as e:
-            print(f"  Playwright error: {e}")
-        finally:
-            browser.close()
-
-    return ediciones
+    return leyes
 
 
-# ── Buscar PDF de una edición ─────────────────────────────
-
-def buscar_pdf(url_edicion):
-    """Busca el PDF en la página de una edición."""
-    if not url_edicion:
-        return None
+def parsear_csv_asamblea(contenido_csv):
+    """Parsea el CSV exportado por la Asamblea."""
+    leyes = []
     try:
-        r    = requests.get(url_edicion, headers=HEADERS, timeout=15)
+        reader = csv.DictReader(io.StringIO(contenido_csv))
+        for row in reader:
+            estado = row.get("Estado", row.get("estado", "")).lower()
+            if "publicado" not in estado:
+                continue
+
+            titulo = row.get("Proyecto", row.get("proyecto", row.get("Titulo", "")))
+            fecha  = row.get("Fecha de Presentación", row.get("fecha", ""))
+            codigo = row.get("Código", row.get("codigo", ""))
+
+            if titulo:
+                leyes.append({
+                    "titulo": titulo.strip(),
+                    "fecha": fecha.strip() if fecha else str(date.today()),
+                    "numero_ro": None,
+                    "url": f"{ASAMBLEA_URL}?cod={codigo}" if codigo else "",
+                })
+    except Exception as e:
+        print(f"  Error parseando CSV: {e}")
+    return leyes
+
+
+# ── Obtener PDF de una ley aprobada ───────────────────────
+
+def obtener_pdf_ley(url_detalle, titulo):
+    """
+    Busca el PDF del texto aprobado en la página de detalle de la ley.
+    La Asamblea publica el 'Texto aprobado por el Pleno' y el 'Registro Oficial'.
+    """
+    if not url_detalle:
+        return None, None
+
+    try:
+        r = requests.get(url_detalle, headers=HEADERS, timeout=20)
         soup = BeautifulSoup(r.text, "html.parser")
+
+        # Buscar link al Registro Oficial o texto aprobado
+        prioridades = ["registro oficial", "texto aprobado", "texto definitivo", "publicado"]
+
+        for prioridad in prioridades:
+            for a in soup.find_all("a", href=True):
+                texto_link = a.get_text(strip=True).lower()
+                href = a["href"]
+                if prioridad in texto_link and (".pdf" in href.lower() or "pdf" in texto_link):
+                    url_pdf = href if href.startswith("http") else f"https://leyes.asambleanacional.gob.ec{href}"
+                    print(f"    PDF encontrado ({prioridad}): {url_pdf[:60]}")
+                    return url_pdf, prioridad
+
+        # Si no encontró por prioridad, tomar cualquier PDF
         for a in soup.find_all("a", href=True):
-            h = a["href"]
-            if ".pdf" in h.lower() or "download" in h.lower():
-                return h if h.startswith("http") else f"https://www.registroficial.gob.ec{h}"
-    except Exception:
-        pass
-    return None
+            if ".pdf" in a["href"].lower():
+                url_pdf = a["href"] if a["href"].startswith("http") else f"https://leyes.asambleanacional.gob.ec{a['href']}"
+                return url_pdf, "pdf"
+
+    except Exception as e:
+        print(f"    Error buscando PDF: {e}")
+
+    return None, None
 
 
 def extraer_texto_pdf(url_pdf):
+    """Descarga y extrae el texto de un PDF."""
     try:
         import fitz
         r = requests.get(url_pdf, headers=HEADERS, timeout=30)
         r.raise_for_status()
-        with open("/tmp/norma.pdf", "wb") as f:
+
+        with open("/tmp/ley.pdf", "wb") as f:
             f.write(r.content)
-        doc   = fitz.open("/tmp/norma.pdf")
+
+        doc   = fitz.open("/tmp/ley.pdf")
         texto = "".join(pg.get_text("text") for pg in doc)
         doc.close()
-        return texto.strip() if len(texto.strip()) > 100 else None
+
+        if len(texto.strip()) > 100:
+            print(f"    Texto extraído: {len(texto)} caracteres")
+            return texto.strip()
+
     except Exception as e:
-        print(f"    PDF error: {e}")
-        return None
+        print(f"    Error extrayendo PDF: {e}")
+
+    return None
 
 
 # ── Clasificador Gemini ───────────────────────────────────
 
-JERARQUIAS = ["Constitución","Tratado Internacional","Ley Orgánica","Ley Ordinaria",
-              "Decreto Ejecutivo","Decreto Ley","Reglamento","Ordenanza",
-              "Resolución","Acuerdo Ministerial","Circular","Instructivo","Otro"]
-VIGENCIAS  = ["Vigente","Derogada","Reformada","Suspendida","En vacatio legis"]
-TEMATICAS  = ["Tributario","Laboral","Penal","Civil","Ambiental","Salud","Educación",
-              "Financiero","Administrativo","Constitucional","Comercial","Familia",
-              "Contratación Pública","Seguridad Social","Telecomunicaciones",
-              "Energía","Transporte","Agricultura","Minería","Otro"]
+TEMATICAS = [
+    "Tributario","Laboral","Penal","Civil","Ambiental","Salud","Educación",
+    "Financiero","Administrativo","Constitucional","Comercial","Familia",
+    "Contratación Pública","Seguridad Social","Telecomunicaciones",
+    "Energía","Transporte","Agricultura","Minería","Otro",
+]
 
-def clasificar(texto):
-    prompt = f"""Analiza esta norma legal ecuatoriana del Registro Oficial.
+def clasificar_ley(titulo, texto=None):
+    """
+    Clasifica una ley usando Gemini.
+    Si hay texto disponible lo usa; si no, solo el título.
+    """
+    contenido = texto[:3000] if texto else f"Título de la ley: {titulo}"
+
+    prompt = f"""Analiza esta ley ecuatoriana aprobada por la Asamblea Nacional.
 Responde SOLO con JSON válido, sin markdown ni texto extra.
 
-TEXTO:
-{texto[:4000]}
+CONTENIDO:
+{contenido}
 
 JSON:
 {{
-  "titulo": "título completo oficial",
-  "numero_norma": "número oficial o null",
-  "jerarquia": "uno de: {' | '.join(JERARQUIAS)}",
-  "origen": "institución emisora",
+  "jerarquia": "Ley Orgánica o Ley Ordinaria",
   "tematica": "una de: {' | '.join(TEMATICAS)}",
-  "vigencia": "uno de: {' | '.join(VIGENCIAS)}",
-  "fecha_pub": "YYYY-MM-DD o null",
-  "sumario": "resumen de 2-3 oraciones"
+  "vigencia": "Vigente",
+  "sumario": "resumen de 2-3 oraciones del contenido principal de la ley"
 }}"""
+
     try:
         r = requests.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
-            json={"contents": [{"parts": [{"text": prompt}]}],
-                  "generationConfig": {"temperature": 0.1, "maxOutputTokens": 800}},
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 400},
+            },
             timeout=30,
         )
         r.raise_for_status()
         raw = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
         raw = re.sub(r"```(?:json)?|```", "", raw).strip()
         d   = json.loads(raw)
-        if d.get("jerarquia") not in JERARQUIAS: d["jerarquia"] = "Otro"
-        if d.get("vigencia")  not in VIGENCIAS:  d["vigencia"]  = "Vigente"
-        if d.get("tematica")  not in TEMATICAS:  d["tematica"]  = "Otro"
         return d
     except Exception as e:
         print(f"    Gemini error: {e}")
-        return None
+        # Fallback: determinar jerarquía por el título
+        jerarquia = "Ley Orgánica" if "orgánica" in titulo.lower() or "organica" in titulo.lower() else "Ley Ordinaria"
+        return {
+            "jerarquia": jerarquia,
+            "tematica": "Otro",
+            "vigencia": "Vigente",
+            "sumario": f"Ley aprobada por la Asamblea Nacional del Ecuador: {titulo}",
+        }
 
 def extraer_arts(texto, n=5):
     arts = []
-    for m in re.finditer(r"Art[íi]culo?\s*\.?\s*(\d+)[°º.]?\s*[-–]?\s*([^\n]{15,250})", texto, re.I):
+    if not texto:
+        return arts
+    for m in re.finditer(
+        r"Art[íi]culo?\s*\.?\s*(\d+)[°º.]?\s*[-–]?\s*([^\n]{15,250})",
+        texto, re.I
+    ):
         arts.append(f"Art. {m.group(1)}: {m.group(2).strip()}")
-        if len(arts) >= n: break
+        if len(arts) >= n:
+            break
     return arts
 
-def separar_normas(texto):
-    partes = re.split(
-        r"(?=(?:DECRETO\s+(?:EJECUTIVO|LEY)|LEY\s+ORG[ÁA]NICA|LEY\s+ORDINARIA|"
-        r"ACUERDO\s+MINISTERIAL|RESOLUCI[ÓO]N|ORDENANZA|REGLAMENTO|CIRCULAR|INSTRUCTIVO)\s)",
-        texto, flags=re.I,
-    )
-    return [p.strip() for p in partes if len(p.strip()) >= 200]
 
-def procesar_edicion(ed):
-    if ya_existe(ed["numero"]):
-        return 0
-    print(f"\n  Procesando {ed['numero']} ({ed['fecha']})...")
+# ── Pipeline principal ────────────────────────────────────
 
-    if not ed.get("url_pdf") and ed.get("url"):
-        ed["url_pdf"] = buscar_pdf(ed["url"])
+def procesar_ley(ley):
+    """Procesa una ley: obtiene PDF, clasifica y guarda en Supabase."""
+    titulo = ley["titulo"]
 
-    texto = extraer_texto_pdf(ed["url_pdf"]) if ed.get("url_pdf") else None
-
-    if not texto:
-        log("WARNING", f"Sin texto para {ed['numero']}")
+    if ya_existe(titulo):
+        print(f"  [{titulo[:50]}...] Ya existe.")
         return 0
 
-    segmentos = separar_normas(texto)
-    print(f"    {len(segmentos)} normas en esta edición")
+    print(f"\n  Procesando: {titulo[:70]}...")
 
-    guardadas = 0
-    for i, seg in enumerate(segmentos, 1):
-        c = clasificar(seg) or {
-            "titulo": f"Norma {ed['numero']} seg.{i}",
-            "jerarquia": "Otro", "vigencia": "Vigente",
-            "tematica": "Otro", "sumario": seg[:300],
-        }
-        norma = {
-            "titulo":       c.get("titulo") or f"Norma {ed['numero']}",
-            "numero_ro":    ed["numero"],
-            "numero_norma": c.get("numero_norma"),
-            "jerarquia":    c.get("jerarquia", "Otro"),
-            "origen":       c.get("origen"),
-            "tematica":     c.get("tematica", "Otro"),
-            "vigencia":     c.get("vigencia", "Vigente"),
-            "fecha_pub":    c.get("fecha_pub") or ed["fecha"],
-            "url_pdf":      ed.get("url_pdf"),
-            "sumario":      c.get("sumario"),
-            "articulos":    extraer_arts(seg) or None,
-            "metodo_ocr":   "automatico",
-        }
-        try:
-            sb_insert("normas", norma)
-            print(f"    ✓ [{norma['jerarquia']}] {norma['titulo'][:55]}")
-            guardadas += 1
-        except Exception as e:
-            print(f"    ✗ {e}")
-        time.sleep(0.4)
-    return guardadas
+    # Buscar PDF del texto aprobado
+    url_pdf, tipo_pdf = obtener_pdf_ley(ley.get("url", ""), titulo)
 
+    # Extraer texto del PDF
+    texto = None
+    if url_pdf:
+        texto = extraer_texto_pdf(url_pdf)
+
+    # Clasificar con Gemini
+    clasificacion = clasificar_ley(titulo, texto)
+    articulos     = extraer_arts(texto) if texto else []
+
+    # Construir registro para Supabase
+    norma = {
+        "titulo":       titulo,
+        "numero_ro":    ley.get("numero_ro"),
+        "numero_norma": None,
+        "jerarquia":    clasificacion.get("jerarquia", "Ley Orgánica"),
+        "origen":       "Asamblea Nacional",
+        "tematica":     clasificacion.get("tematica", "Otro"),
+        "vigencia":     "Vigente",
+        "fecha_pub":    ley.get("fecha") or str(date.today()),
+        "url_pdf":      url_pdf,
+        "sumario":      clasificacion.get("sumario"),
+        "articulos":    articulos if articulos else None,
+        "metodo_ocr":   "asamblea_nacional",
+    }
+
+    try:
+        sb_insert("normas", norma)
+        print(f"  ✓ Guardada: [{norma['jerarquia']}] [{norma['tematica']}] {titulo[:55]}")
+        return 1
+    except Exception as e:
+        print(f"  ✗ Error guardando: {e}")
+        log("ERROR", f"Error guardando {titulo[:60]}", {"error": str(e)})
+        return 0
+
+
+# ── Main ──────────────────────────────────────────────────
 
 def main():
     inicio = datetime.now()
-    print(f"\n{'='*50}\nLexEC Scraper — {inicio.strftime('%Y-%m-%d %H:%M')}\n{'='*50}\n")
+    print(f"\n{'='*55}")
+    print(f"LexEC — Scraper Asamblea Nacional — {inicio.strftime('%Y-%m-%d %H:%M')}")
+    print(f"{'='*55}\n")
     log("INFO", f"Iniciado — {inicio.strftime('%Y-%m-%d %H:%M')}")
 
-    ediciones = obtener_ediciones()
-    if not ediciones:
-        msg = "No se encontraron ediciones nuevas hoy."
+    # Obtener leyes publicadas
+    leyes = obtener_leyes_publicadas()
+
+    if not leyes:
+        msg = "No se encontraron leyes publicadas nuevas."
         print(f"\n{msg}")
         log("INFO", msg)
         return
 
+    print(f"\n  Total leyes publicadas encontradas: {len(leyes)}")
+    print(f"  Procesando solo las que no están en la BD...\n")
+
     total = 0
-    for ed in ediciones:
+    for ley in leyes:
         try:
-            total += procesar_edicion(ed)
+            total += procesar_ley(ley)
+            time.sleep(0.5)  # pausa cortés entre requests
         except Exception as e:
-            print(f"  Error: {e}")
+            print(f"  Error en {ley.get('titulo', '?')[:40]}: {e}")
             log("ERROR", str(e))
 
     seg = (datetime.now() - inicio).seconds
-    msg = f"Completado: {total} normas nuevas en {seg}s"
+    msg = f"Completado: {total} leyes nuevas guardadas en {seg}s"
     print(f"\n{msg}")
-    log("INFO", msg, {"normas_nuevas": total, "segundos": seg})
+    log("INFO", msg, {"leyes_nuevas": total, "segundos": seg})
+
 
 if __name__ == "__main__":
     main()
