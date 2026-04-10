@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LexEC — Leyes del Ecuador</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600&family=DM+Sans:wght@300;400;500&family=DM+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --paper:#f8f6f1;--white:#ffffff;--ink:#1a1816;--ink2:#5c5750;--ink3:#a09c94;
+  --rule:#e8e4dc;--rule2:#d0ccc2;
+  --teal:#0d6b52;--teal-bg:#e0f2eb;
+  --blue:#1a4bb0;--blue-bg:#eaeffa;
+  --amber:#7a480a;--amber-bg:#faebd0;
+  --red:#9a2828;--red-bg:#fbeaea;
+  --plum:#4e3faa;--plum-bg:#edeafc;
+}
+html{scroll-behavior:smooth}
+body{font-family:'DM Sans',sans-serif;background:var(--paper);color:var(--ink);font-size:15px;line-height:1.65;-webkit-font-smoothing:antialiased}
+
+/* NAV */
+nav{background:var(--white);border-bottom:1px solid var(--rule);position:sticky;top:0;z-index:100;box-shadow:0 1px 8px rgba(0,0,0,.04)}
+.nav-inner{max-width:1100px;margin:0 auto;padding:0 1.5rem;height:58px;display:flex;align-items:center;gap:2rem}
+.logo{font-family:'Fraunces',serif;font-size:22px;font-weight:600;color:var(--ink);text-decoration:none;letter-spacing:-.01em;display:flex;align-items:center;gap:8px}
+.logo-tag{font-family:'DM Sans',sans-serif;font-size:10px;font-weight:500;background:var(--teal-bg);color:var(--teal);padding:2px 8px;border-radius:20px;letter-spacing:.04em}
+.nav-right{margin-left:auto;font-size:12px;color:var(--ink3)}
+
+/* MAIN */
+main{max-width:1100px;margin:0 auto;padding:2.5rem 1.5rem}
+
+/* HERO */
+.hero{margin-bottom:2rem}
+.hero h1{font-family:'Fraunces',serif;font-size:38px;font-weight:600;letter-spacing:-.02em;line-height:1.15;margin-bottom:8px}
+.hero h1 span{color:var(--teal)}
+.hero p{color:var(--ink2);font-size:14px;max-width:560px}
+
+/* SYNC BAR */
+.sync-bar{display:flex;align-items:center;gap:10px;background:var(--white);border:1px solid var(--rule);border-radius:10px;padding:10px 16px;margin-bottom:1.5rem;font-size:13px;color:var(--ink2)}
+.sync-dot{width:8px;height:8px;border-radius:50%;background:#1D9E75;flex-shrink:0;animation:pulse 2.5s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.85)}}
+
+/* SEARCH */
+.search-wrap{position:relative;margin-bottom:14px}
+.search-input{width:100%;height:48px;border:1.5px solid var(--rule2);border-radius:12px;padding:0 20px 0 48px;font-size:15px;font-family:'DM Sans',sans-serif;background:var(--white);color:var(--ink);outline:none;transition:border-color .2s,box-shadow .2s}
+.search-input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(26,75,176,.1)}
+.search-icon{position:absolute;left:16px;top:50%;transform:translateY(-50%);color:var(--ink3);pointer-events:none;font-size:18px}
+
+/* FILTERS */
+.filters{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:1.75rem;align-items:flex-end}
+.filter-group{display:flex;flex-direction:column;gap:5px}
+.filter-label{font-size:10px;font-weight:500;color:var(--ink3);letter-spacing:.06em;text-transform:uppercase}
+.filter-select{height:38px;border:1px solid var(--rule);border-radius:8px;padding:0 12px;font-size:13px;font-family:'DM Sans',sans-serif;background:var(--white);color:var(--ink);cursor:pointer;min-width:158px;transition:border-color .15s}
+.filter-select:focus{outline:none;border-color:var(--blue)}
+.clear-btn{height:38px;padding:0 14px;font-size:13px;border:1px solid var(--rule);border-radius:8px;background:transparent;color:var(--ink2);cursor:pointer;font-family:'DM Sans',sans-serif;align-self:flex-end;transition:background .15s}
+.clear-btn:hover{background:var(--rule)}
+
+/* RESULTS BAR */
+.results-bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;font-size:13px;color:var(--ink2)}
+.results-count strong{color:var(--ink)}
+
+/* CARDS */
+.law-list{display:flex;flex-direction:column;gap:8px}
+.card{background:var(--white);border:1px solid var(--rule);border-radius:14px;padding:1rem 1.25rem;cursor:pointer;transition:border-color .15s,box-shadow .15s}
+.card:hover{border-color:var(--rule2);box-shadow:0 2px 16px rgba(0,0,0,.06)}
+.card.open{border-color:var(--rule2);box-shadow:0 2px 16px rgba(0,0,0,.06)}
+.card-top{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}
+.card-title{font-weight:500;font-size:14px;line-height:1.4;margin-bottom:9px}
+.badges{display:flex;flex-wrap:wrap;gap:5px}
+.badge{display:inline-block;font-size:11px;font-weight:500;padding:2px 10px;border-radius:20px;white-space:nowrap}
+.card-meta{text-align:right;flex-shrink:0}
+.card-ro{font-size:12px;color:var(--ink3);white-space:nowrap}
+.card-date{font-size:12px;color:var(--ink3);margin-top:2px}
+.card-excerpt{margin-top:10px;font-size:13px;color:var(--ink2);line-height:1.6;overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
+.card-excerpt.expanded{-webkit-line-clamp:unset}
+.card-detail{display:none;margin-top:14px;padding-top:14px;border-top:1px solid var(--rule)}
+.card-detail.open{display:block}
+.detail-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
+.btn{height:36px;padding:0 16px;font-size:12.5px;border-radius:8px;border:1px solid var(--rule2);background:var(--white);color:var(--ink);cursor:pointer;font-family:'DM Sans',sans-serif;font-weight:500;text-decoration:none;display:inline-flex;align-items:center;transition:background .12s}
+.btn:hover{background:var(--paper)}
+.btn-primary{background:var(--blue);color:#fff;border-color:var(--blue)}
+.btn-primary:hover{background:#1240a0}
+
+/* BADGE COLORS */
+.b-const,.b-ley-org{background:var(--plum-bg);color:var(--plum)}
+.b-ley-ord{background:var(--blue-bg);color:var(--blue)}
+.b-dec{background:var(--amber-bg);color:var(--amber)}
+.b-reg,.b-orde{background:var(--teal-bg);color:var(--teal)}
+.b-res,.b-ac{background:#fce8f3;color:#7a1f5a}
+.b-vig{background:var(--teal-bg);color:var(--teal)}
+.b-der{background:var(--red-bg);color:var(--red)}
+.b-ref{background:var(--amber-bg);color:var(--amber)}
+.b-tema{background:#f5f0ff;color:#4e3faa}
+.b-neu{background:#f1ede8;color:#5c5750}
+
+/* EMPTY / LOADING */
+.empty{text-align:center;padding:4rem 1rem;color:var(--ink3);font-size:14px}
+.empty-icon{font-size:40px;margin-bottom:16px}
+.skeleton{background:linear-gradient(90deg,var(--rule) 25%,#efeae0 50%,var(--rule) 75%);background-size:200% 100%;animation:shimmer 1.4s ease-in-out infinite;border-radius:14px}
+@keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+
+/* PAGINATION */
+.pag{display:flex;justify-content:center;align-items:center;gap:8px;margin-top:2rem}
+.pag-btn{padding:8px 20px;border-radius:8px;border:1px solid var(--rule);background:var(--white);font-size:13px;cursor:pointer;font-family:'DM Sans',sans-serif;color:var(--ink);transition:background .12s}
+.pag-btn:hover:not(:disabled){background:var(--paper)}
+.pag-btn:disabled{opacity:.35;cursor:not-allowed}
+.pag-info{font-size:13px;color:var(--ink2);padding:0 8px}
+
+/* FOOTER */
+footer{border-top:1px solid var(--rule);padding:1.5rem;text-align:center;font-size:12px;color:var(--ink3);margin-top:4rem}
+footer a{color:var(--ink3)}
+
+/* STATS BAR */
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin-bottom:2rem}
+.stat-card{background:var(--white);border:1px solid var(--rule);border-radius:10px;padding:.875rem 1rem}
+.stat-num{font-family:'Fraunces',serif;font-size:28px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+.stat-label{font-size:12px;color:var(--ink3);margin-top:2px}
+
+@media(max-width:640px){
+  .hero h1{font-size:28px}
+  .filters{flex-direction:column}
+  .stats-row{grid-template-columns:repeat(2,1fr)}
+  .card-top{flex-direction:column}
+  .card-meta{text-align:left}
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="#" class="logo">⚖ LexEC <span class="logo-tag">BETA</span></a>
+    <div class="nav-right">Registro Oficial · Asamblea Nacional del Ecuador</div>
+  </div>
+</nav>
+
+<main>
+  <div class="hero">
+    <h1>Leyes del <span>Ecuador</span></h1>
+    <p>Base de datos indexada de leyes aprobadas por la Asamblea Nacional. Búsqueda en tiempo real con clasificación por IA.</p>
+  </div>
+
+  <div class="sync-bar" id="syncBar">
+    <div class="sync-dot"></div>
+    <span id="syncText">Conectando con la base de datos...</span>
+  </div>
+
+  <div class="stats-row" id="statsRow" style="display:none">
+    <div class="stat-card"><div class="stat-num" id="sTotal">—</div><div class="stat-label">Leyes indexadas</div></div>
+    <div class="stat-card"><div class="stat-num" id="sVigentes" style="color:var(--teal)">—</div><div class="stat-label">Vigentes</div></div>
+    <div class="stat-card"><div class="stat-num" id="sOrganicas" style="color:var(--plum)">—</div><div class="stat-label">Leyes Orgánicas</div></div>
+    <div class="stat-card"><div class="stat-num" id="sHoy" style="color:var(--blue)">—</div><div class="stat-label">Nuevas hoy</div></div>
+  </div>
+
+  <div class="search-wrap">
+    <span class="search-icon">🔍</span>
+    <input class="search-input" id="searchInput" placeholder="Buscar por título, número, temática..." autocomplete="off">
+  </div>
+
+  <div class="filters">
+    <div class="filter-group">
+      <label class="filter-label">Jerarquía</label>
+      <select class="filter-select" id="fJerarquia">
+        <option value="">Todas</option>
+        <option>Ley Orgánica</option>
+        <option>Ley Ordinaria</option>
+        <option>Decreto Ejecutivo</option>
+        <option>Reglamento</option>
+        <option>Ordenanza</option>
+        <option>Resolución</option>
+        <option>Acuerdo Ministerial</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label class="filter-label">Vigencia</label>
+      <select class="filter-select" id="fVigencia">
+        <option value="">Todas</option>
+        <option>Vigente</option>
+        <option>Derogada</option>
+        <option>Reformada</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label class="filter-label">Temática</label>
+      <select class="filter-select" id="fTematica">
+        <option value="">Todas</option>
+        <option>Tributario</option><option>Laboral</option><option>Penal</option>
+        <option>Civil</option><option>Ambiental</option><option>Salud</option>
+        <option>Educación</option><option>Financiero</option><option>Administrativo</option>
+        <option>Constitucional</option><option>Comercial</option><option>Familia</option>
+        <option>Contratación Pública</option><option>Seguridad Social</option>
+        <option>Energía</option><option>Transporte</option><option>Minería</option><option>Otro</option>
+      </select>
+    </div>
+    <button class="clear-btn" id="clearBtn" style="display:none" onclick="clearFilters()">Limpiar ×</button>
+  </div>
+
+  <div class="results-bar">
+    <span class="results-count" id="resultsCount"></span>
+    <span id="pageInfo" style="font-size:13px;color:var(--ink3)"></span>
+  </div>
+
+  <div class="law-list" id="lawList"></div>
+
+  <div class="pag" id="pagination" style="display:none">
+    <button class="pag-btn" id="btnPrev" onclick="changePage(-1)">← Anterior</button>
+    <span class="pag-info" id="pagInfo"></span>
+    <button class="pag-btn" id="btnNext" onclick="changePage(1)">Siguiente →</button>
+  </div>
+</main>
+
+<footer>
+  <p>LexEC · Datos obtenidos de la Asamblea Nacional del Ecuador · No es un sistema oficial · Verificar siempre la fuente original</p>
+  <p style="margin-top:4px"><a href="https://www.asambleanacional.gob.ec/es/leyes-aprobadas" target="_blank">asambleanacional.gob.ec</a> · <a href="https://www.registroficial.gob.ec" target="_blank">registroficial.gob.ec</a></p>
+</footer>
+
+<script>
+// ── CONFIGURACIÓN SUPABASE ────────────────────────────────
+// IMPORTANTE: reemplaza estos valores con los tuyos
+const SUPABASE_URL = 'https://qmhgdkroytiylfxviuhg.supabase.co'
+const SUPABASE_KEY = 'sb_publishable_oJzhTmw1nb2tyP0tcgD9bw_4r6N96a0'
+
+// ── ESTADO ────────────────────────────────────────────────
+let currentPage  = 1
+let totalPages   = 1
+let totalItems   = 0
+let openCard     = null
+let debounceTimer = null
+const PER_PAGE   = 20
+
+// ── BADGE HELPERS ─────────────────────────────────────────
+const HIER_CLASS = {
+  'Constitución':'b-const','Ley Orgánica':'b-ley-org','Ley Ordinaria':'b-ley-ord',
+  'Decreto Ejecutivo':'b-dec','Decreto Ley':'b-dec','Reglamento':'b-reg',
+  'Ordenanza':'b-orde','Resolución':'b-res','Acuerdo Ministerial':'b-ac',
+}
+const VIG_CLASS  = {'Vigente':'b-vig','Derogada':'b-der','Reformada':'b-ref'}
+
+function badge(txt, cls){ return `<span class="badge ${cls||'b-neu'}">${txt}</span>` }
+
+function badgesNorma(n){
+  return [
+    badge(n.jerarquia, HIER_CLASS[n.jerarquia]||'b-neu'),
+    badge(n.vigencia,  VIG_CLASS[n.vigencia]||'b-neu'),
+    n.tematica ? badge(n.tematica, 'b-tema') : '',
+    n.origen   ? badge(n.origen,   'b-neu')  : '',
+  ].filter(Boolean).join('')
+}
+
+function fmtFecha(d){
+  if(!d) return '—'
+  const dt = new Date(d+'T00:00:00')
+  return dt.toLocaleDateString('es-EC',{day:'numeric',month:'short',year:'numeric'})
+}
+
+// ── SUPABASE QUERY ────────────────────────────────────────
+async function fetchNormas(){
+  const q  = document.getElementById('searchInput').value.trim()
+  const j  = document.getElementById('fJerarquia').value
+  const v  = document.getElementById('fVigencia').value
+  const t  = document.getElementById('fTematica').value
+
+  const offset = (currentPage - 1) * PER_PAGE
+
+  let url = `${SUPABASE_URL}/rest/v1/normas?select=*&order=fecha_pub.desc,created_at.desc&limit=${PER_PAGE}&offset=${offset}`
+
+  // Filtro por jerarquía
+  if(j) url += `&jerarquia=eq.${encodeURIComponent(j)}`
+  // Filtro por vigencia
+  if(v) url += `&vigencia=eq.${encodeURIComponent(v)}`
+  // Filtro por temática
+  if(t) url += `&tematica=eq.${encodeURIComponent(t)}`
+  // Búsqueda por texto en título y sumario
+  if(q){
+    const qEnc = encodeURIComponent(q)
+    url += `&or=(titulo.ilike.*${qEnc}*,sumario.ilike.*${qEnc}*,numero_ro.ilike.*${qEnc}*)`
+  }
+
+  const res = await fetch(url, {
+    headers:{
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Prefer': 'count=exact',
+    }
+  })
+
+  if(!res.ok) throw new Error(`Supabase error: ${res.status}`)
+
+  const data  = await res.json()
+  const range = res.headers.get('content-range') || ''
+  const total = parseInt(range.split('/')[1]) || data.length
+
+  return { items: data, total }
+}
+
+async function fetchStats(){
+  const url = `${SUPABASE_URL}/rest/v1/normas?select=vigencia,jerarquia,created_at`
+  const res = await fetch(url, {
+    headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'count=exact'}
+  })
+  const data = await res.json()
+  const total     = data.length
+  const vigentes  = data.filter(n=>n.vigencia==='Vigente').length
+  const organicas = data.filter(n=>n.jerarquia==='Ley Orgánica').length
+  const hoy       = data.filter(n=>{
+    const d = new Date(n.created_at)
+    const now = new Date()
+    return d.toDateString()===now.toDateString()
+  }).length
+
+  document.getElementById('sTotal').textContent    = total.toLocaleString('es-EC')
+  document.getElementById('sVigentes').textContent = vigentes.toLocaleString('es-EC')
+  document.getElementById('sOrganicas').textContent= organicas.toLocaleString('es-EC')
+  document.getElementById('sHoy').textContent      = hoy.toLocaleString('es-EC')
+  document.getElementById('statsRow').style.display= 'grid'
+  document.getElementById('syncBar').innerHTML      = `
+    <div class="sync-dot"></div>
+    <span><strong>${total.toLocaleString('es-EC')}</strong> leyes indexadas · Asamblea Nacional del Ecuador · Actualización automática diaria</span>`
+}
+
+// ── RENDER ────────────────────────────────────────────────
+function renderCard(n, idx){
+  const isOpen = openCard === n.id
+  return `
+  <div class="card${isOpen?' open':''}" id="c-${n.id}" onclick="toggleCard('${n.id}',event)">
+    <div class="card-top">
+      <div style="flex:1;min-width:0">
+        <div class="card-title">${n.titulo}</div>
+        <div class="badges">${badgesNorma(n)}</div>
+      </div>
+      <div class="card-meta">
+        <div class="card-ro">${n.numero_ro||'—'}</div>
+        <div class="card-date">${fmtFecha(n.fecha_pub)}</div>
+      </div>
+    </div>
+    ${n.sumario?`<p class="card-excerpt${isOpen?' expanded':''}">${n.sumario}</p>`:''}
+    <div class="card-detail${isOpen?' open':''}">
+      ${n.articulos&&n.articulos.length?`
+        <div style="font-size:11px;font-weight:500;color:var(--ink3);letter-spacing:.06em;margin-bottom:8px">ARTÍCULOS DESTACADOS</div>
+        <div style="display:flex;flex-direction:column;gap:5px;margin-bottom:12px">
+          ${n.articulos.map(a=>`<div style="font-size:13px;color:var(--ink2);padding-left:12px;border-left:2px solid var(--rule2);line-height:1.55">${a}</div>`).join('')}
+        </div>`:''}
+      <div class="detail-actions" onclick="event.stopPropagation()">
+        ${n.url_pdf?`<a class="btn btn-primary" href="${n.url_pdf}" target="_blank" rel="noopener">Descargar PDF ↗</a>`:''}
+        <a class="btn" href="https://www.asambleanacional.gob.ec/es/leyes-aprobadas" target="_blank" rel="noopener">Asamblea Nacional ↗</a>
+      </div>
+    </div>
+  </div>`
+}
+
+function renderList(items, total){
+  totalItems = total
+  totalPages = Math.ceil(total / PER_PAGE)
+
+  const count = document.getElementById('resultsCount')
+  count.innerHTML = `<strong>${total.toLocaleString('es-EC')}</strong> resultado${total!==1?'s':''}`
+
+  if(totalPages>1){
+    document.getElementById('pageInfo').textContent = `Página ${currentPage} de ${totalPages}`
+  } else {
+    document.getElementById('pageInfo').textContent = ''
+  }
+
+  const list = document.getElementById('lawList')
+  if(items.length===0){
+    list.innerHTML = `<div class="empty"><div class="empty-icon">📋</div>No se encontraron leyes con esos criterios.</div>`
+  } else {
+    list.innerHTML = items.map((n,i) => renderCard(n,i)).join('')
+  }
+
+  // Paginación
+  const pag = document.getElementById('pagination')
+  if(totalPages>1){
+    pag.style.display='flex'
+    document.getElementById('btnPrev').disabled = currentPage<=1
+    document.getElementById('btnNext').disabled = currentPage>=totalPages
+    document.getElementById('pagInfo').textContent = `${currentPage} / ${totalPages}`
+  } else {
+    pag.style.display='none'
+  }
+}
+
+function showSkeletons(){
+  document.getElementById('lawList').innerHTML =
+    [110,95,120].map(h=>`<div class="skeleton" style="height:${h}px"></div>`).join('')
+}
+
+// ── BÚSQUEDA ──────────────────────────────────────────────
+async function buscar(){
+  showSkeletons()
+  try {
+    const {items, total} = await fetchNormas()
+    renderList(items, total)
+  } catch(e){
+    document.getElementById('lawList').innerHTML =
+      `<div class="empty"><div class="empty-icon">⚠️</div>Error conectando con la base de datos.<br><small>${e.message}</small></div>`
+    document.getElementById('syncBar').innerHTML =
+      `<span>⚠ Error de conexión — verifica las credenciales de Supabase</span>`
+  }
+}
+
+function onInputChange(){
+  clearTimeout(debounceTimer)
+  const hayFiltros = document.getElementById('searchInput').value ||
+    document.getElementById('fJerarquia').value ||
+    document.getElementById('fVigencia').value ||
+    document.getElementById('fTematica').value
+  document.getElementById('clearBtn').style.display = hayFiltros ? 'block' : 'none'
+  debounceTimer = setTimeout(()=>{ currentPage=1; openCard=null; buscar() }, 320)
+}
+
+function clearFilters(){
+  document.getElementById('searchInput').value=''
+  document.getElementById('fJerarquia').value=''
+  document.getElementById('fVigencia').value=''
+  document.getElementById('fTematica').value=''
+  document.getElementById('clearBtn').style.display='none'
+  currentPage=1; openCard=null; buscar()
+}
+
+function changePage(dir){
+  currentPage = Math.max(1, Math.min(totalPages, currentPage+dir))
+  openCard=null
+  buscar()
+  window.scrollTo({top:0,behavior:'smooth'})
+}
+
+function toggleCard(id, e){
+  openCard = openCard===id ? null : id
+  const q  = document.getElementById('searchInput').value.trim()
+  const j  = document.getElementById('fJerarquia').value
+  const v  = document.getElementById('fVigencia').value
+  const t  = document.getElementById('fTematica').value
+  // Re-render solo el card sin nueva query
+  document.querySelectorAll('.card').forEach(el => el.classList.remove('open'))
+  document.querySelectorAll('.card-detail').forEach(el => el.classList.remove('open'))
+  document.querySelectorAll('.card-excerpt').forEach(el => el.classList.remove('expanded'))
+  if(openCard){
+    const card = document.getElementById(`c-${openCard}`)
+    if(card){
+      card.classList.add('open')
+      card.querySelector('.card-detail')?.classList.add('open')
+      card.querySelector('.card-excerpt')?.classList.add('expanded')
+    }
+  }
+}
+
+// ── EVENTOS ───────────────────────────────────────────────
+document.getElementById('searchInput').addEventListener('input', onInputChange)
+document.getElementById('fJerarquia').addEventListener('change', ()=>{currentPage=1;openCard=null;onInputChange()})
+document.getElementById('fVigencia').addEventListener('change',  ()=>{currentPage=1;openCard=null;onInputChange()})
+document.getElementById('fTematica').addEventListener('change',  ()=>{currentPage=1;openCard=null;onInputChange()})
+
+// ── INIT ──────────────────────────────────────────────────
+buscar()
+fetchStats()
+</script>
+</body>
+</html>
