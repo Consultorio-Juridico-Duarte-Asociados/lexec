@@ -255,68 +255,68 @@ function fmtFecha(d){
 }
 
 // ── SUPABASE QUERY ────────────────────────────────────────
+// Normaliza texto: quita tildes y pasa a minúsculas
+function norm(s){ return (s||'').normalize('NFD').replace(/̀-ͯ/g,'').toLowerCase() }
+
+// Todas las normas en caché para búsqueda local
+let _cache = null
+let _cacheFilters = ''
+
 async function fetchNormas(){
   const q  = document.getElementById('searchInput').value.trim()
   const j  = document.getElementById('fJerarquia').value
   const v  = document.getElementById('fVigencia').value
   const t  = document.getElementById('fTematica').value
 
-  const offset = (currentPage - 1) * PER_PAGE
-
-  let url = `${SUPABASE_URL}/rest/v1/normas?select=*&order=fecha_pub.desc,created_at.desc&limit=${PER_PAGE}&offset=${offset}`
-
-  // Filtro por jerarquía
-  if(j) url += `&jerarquia=eq.${encodeURIComponent(j)}`
-  // Filtro por vigencia
-  if(v) url += `&vigencia=eq.${encodeURIComponent(v)}`
-  // Filtro por temática
-  if(t) url += `&tematica=eq.${encodeURIComponent(t)}`
-  // Búsqueda por texto en título y sumario
+  // Si hay texto libre → descargamos todo y filtramos localmente
+  // (evita el problema de tildes en Supabase)
   if(q){
-    const qEnc = encodeURIComponent(q)
-    url += `&or=(titulo.ilike.*${qEnc}*,sumario.ilike.*${qEnc}*,numero_ro.ilike.*${qEnc}*)`
+    // Descargar todo si no hay caché o cambió algún filtro
+    const filterKey = j+'|'+v+'|'+t
+    if(!_cache || _cacheFilters !== filterKey){
+      let url = `${SUPABASE_URL}/rest/v1/normas?select=id,titulo,numero_ro,numero_norma,jerarquia,origen,tematica,vigencia,fecha_pub,sumario,articulos,url_pdf&order=fecha_pub.desc,created_at.desc&limit=1000`
+      if(j) url += `&jerarquia=eq.${encodeURIComponent(j)}`
+      if(v) url += `&vigencia=eq.${encodeURIComponent(v)}`
+      if(t) url += `&tematica=eq.${encodeURIComponent(t)}`
+      const res = await fetch(url, {headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`}})
+      if(!res.ok) throw new Error(`Error ${res.status}`)
+      _cache = await res.json()
+      _cacheFilters = filterKey
+    }
+
+    // Filtrar localmente sin importar tildes ni mayúsculas
+    const qn = norm(q)
+    const filtered = _cache.filter(n =>
+      norm(n.titulo).includes(qn) ||
+      norm(n.sumario||'').includes(qn) ||
+      norm(n.numero_ro||'').includes(qn) ||
+      norm(n.numero_norma||'').includes(qn) ||
+      norm(n.origen||'').includes(qn) ||
+      norm(n.tematica||'').includes(qn)
+    )
+
+    const total  = filtered.length
+    const offset = (currentPage - 1) * PER_PAGE
+    const items  = filtered.slice(offset, offset + PER_PAGE)
+    return { items, total }
   }
 
-  const res = await fetch(url, {
-    headers:{
-      'apikey': SUPABASE_KEY,
-      'Authorization': `Bearer ${SUPABASE_KEY}`,
-      'Prefer': 'count=exact',
-    }
-  })
+  // Sin texto → consulta paginada normal a Supabase
+  _cache = null
+  const offset = (currentPage - 1) * PER_PAGE
+  let url = `${SUPABASE_URL}/rest/v1/normas?select=*&order=fecha_pub.desc,created_at.desc&limit=${PER_PAGE}&offset=${offset}`
+  if(j) url += `&jerarquia=eq.${encodeURIComponent(j)}`
+  if(v) url += `&vigencia=eq.${encodeURIComponent(v)}`
+  if(t) url += `&tematica=eq.${encodeURIComponent(t)}`
 
-  if(!res.ok) throw new Error(`Supabase error: ${res.status}`)
-
-  const data  = await res.json()
-  const range = res.headers.get('content-range') || ''
-  const total = parseInt(range.split('/')[1]) || data.length
-
-  return { items: data, total }
-}
-
-async function fetchStats(){
-  const url = `${SUPABASE_URL}/rest/v1/normas?select=vigencia,jerarquia,created_at`
   const res = await fetch(url, {
     headers:{'apikey':SUPABASE_KEY,'Authorization':`Bearer ${SUPABASE_KEY}`,'Prefer':'count=exact'}
   })
-  const data = await res.json()
-  const total     = data.length
-  const vigentes  = data.filter(n=>n.vigencia==='Vigente').length
-  const organicas = data.filter(n=>n.jerarquia==='Ley Orgánica').length
-  const hoy       = data.filter(n=>{
-    const d = new Date(n.created_at)
-    const now = new Date()
-    return d.toDateString()===now.toDateString()
-  }).length
-
-  document.getElementById('sTotal').textContent    = total.toLocaleString('es-EC')
-  document.getElementById('sVigentes').textContent = vigentes.toLocaleString('es-EC')
-  document.getElementById('sOrganicas').textContent= organicas.toLocaleString('es-EC')
-  document.getElementById('sHoy').textContent      = hoy.toLocaleString('es-EC')
-  document.getElementById('statsRow').style.display= 'grid'
-  document.getElementById('syncBar').innerHTML      = `
-    <div class="sync-dot"></div>
-    <span><strong>${total.toLocaleString('es-EC')}</strong> leyes indexadas · Asamblea Nacional del Ecuador · Actualización automática diaria</span>`
+  if(!res.ok) throw new Error(`Supabase error: ${res.status}`)
+  const data  = await res.json()
+  const range = res.headers.get('content-range') || ''
+  const total = parseInt(range.split('/')[1]) || data.length
+  return { items: data, total }
 }
 
 // ── RENDER ────────────────────────────────────────────────
