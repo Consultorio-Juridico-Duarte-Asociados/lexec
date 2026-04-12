@@ -256,7 +256,7 @@ function fmtFecha(d){
 
 // ── SUPABASE QUERY ────────────────────────────────────────
 // Normaliza texto: quita tildes y pasa a minúsculas
-function norm(s){ return (s||'').normalize('NFD').replace(/̀-ͯ/g,'').toLowerCase() }
+function norm(s){ if(!s) return ''; var r=''; for(var i=0;i<s.length;i++){var c=s[i].normalize('NFD')[0]; r+=c;} return r.toLowerCase(); }
 
 // Todas las normas en caché para búsqueda local
 let _cache = null
