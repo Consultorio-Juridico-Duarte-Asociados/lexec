@@ -4,7 +4,7 @@ import os
 from supabase import create_client
 import time
 
-# 1. Configuración de conexión (Usa los secretos que ya tienes en GitHub)
+# Configuración de conexión
 url_supabase = os.environ.get("SUPABASE_URL")
 key_supabase = os.environ.get("SUPABASE_SERVICE_KEY")
 supabase = create_client(url_supabase, key_supabase)
@@ -13,42 +13,48 @@ def scraping_presidencia():
     print("--- Iniciando sincronización de Decretos Ejecutivos ---")
     url_fuente = "https://www.presidencia.gob.ec/decretos-ejecutivos/"
     
-    # Cabeceras para que el servidor nos vea como un navegador real
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'es-ES,es;q=0.9',
     }
     
     try:
-        # Intentar la conexión con tiempo de espera de 20 segundos
-        response = requests.get(url_fuente, headers=headers, timeout=20)
-        response.raise_for_status() 
+        response = requests.get(url_fuente, headers=headers, timeout=30)
+        response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Localizamos la tabla de decretos
-        tabla = soup.find('table') 
+        # Búsqueda más flexible de la tabla
+        # Intentamos buscar por etiqueta, pero también por clases comunes en WordPress (que usa la Presidencia)
+        tabla = soup.find('table') or soup.find(class_='wp-block-table') or soup.find('tbody')
+        
         if not tabla:
-            print("Error: No se encontró la tabla de datos en la página.")
+            # Si aún no aparece, imprimimos un poco del contenido para diagnóstico
+            print("Error: No se encontró la tabla. Estructura de página detectada parcialmente.")
             return
 
-        # Obtenemos todas las filas menos la primera (encabezado)
-        filas = tabla.find_all('tr')[1:] 
-        print(f"Se encontraron {len(filas)} decretos en la página. Procesando...")
+        filas = tabla.find_all('tr')
+        print(f"Filas detectadas: {len(filas)}. Procesando...")
 
         for fila in filas:
             cols = fila.find_all('td')
-            if len(cols) >= 4:
-                num_decreto = cols[0].text.strip()
-                fecha_pub = cols[1].text.strip()
-                asunto_texto = cols[2].text.strip()
-                # Extraer link del PDF
-                link_tag = cols[3].find('a')
+            # Verificamos que sea una fila con datos (mínimo 3 o 4 columnas)
+            if len(cols) >= 3:
+                # Limpiamos los textos
+                num_decreto = cols[0].get_text(strip=True)
+                
+                # Evitamos procesar la fila de encabezado si el primer campo dice "No." o "Número"
+                if "No" in num_decreto or "Nro" in num_decreto:
+                    continue
+                    
+                fecha_pub = cols[1].get_text(strip=True)
+                asunto_texto = cols[2].get_text(strip=True)
+                
+                # Buscamos el link en cualquier parte de la fila por si no está en la última columna
+                link_tag = fila.find('a', href=True)
                 link_pdf = link_tag['href'] if link_tag else None
 
-                if link_pdf:
-                    # Estructura para tu tabla 'normas' en Supabase
+                if link_pdf and num_decreto:
                     data = {
                         "titulo": f"Decreto Ejecutivo No. {num_decreto}",
                         "resumen": asunto_texto,
@@ -59,22 +65,18 @@ def scraping_presidencia():
                         "estado": "Vigente"
                     }
                     
-                    # Guardar o actualizar en Supabase (evita duplicados por título)
                     try:
                         supabase.table("normas").upsert(data, on_conflict="titulo").execute()
                         print(f"✓ Guardado: Decreto {num_decreto}")
                     except Exception as db_err:
-                        print(f"x Error al guardar en base de datos: {db_err}")
+                        print(f"x Error en Supabase: {db_err}")
                     
-                    # Pausa de 1 segundo para no saturar al servidor
-                    time.sleep(1)
+                    time.sleep(0.5)
 
-        print("--- Proceso finalizado con éxito ---")
+        print("--- Proceso finalizado ---")
 
-    except requests.exceptions.ConnectionError:
-        print("Error: La conexión fue rechazada por el servidor. Reintentando en la próxima ejecución.")
     except Exception as e:
-        print(f"Ocurrió un error inesperado: {e}")
+        print(f"Ocurrió un error: {e}")
 
 if __name__ == "__main__":
     scraping_presidencia()
