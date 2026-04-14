@@ -10,92 +10,77 @@ key_supabase = os.environ.get("SUPABASE_SERVICE_KEY")
 supabase = create_client(url_supabase, key_supabase)
 
 def scraping_presidencia():
-    print("--- Iniciando Sincronización LexEC (Protocolo Directo) ---")
-    # Usamos la URL principal de decretos
+    print("--- Iniciando Sincronización LexEC (Protocolo de Emergencia) ---")
+    
+    # Intentaremos con la URL de archivos directamente
     url_fuente = "https://www.presidencia.gob.ec/decretos-ejecutivos/"
     
-    # Cabeceras ultra-reales para evitar el bloqueo de "contenedor no encontrado"
+    # Cabeceras simulando un iPhone (los servidores suelen ser menos estrictos con móviles)
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'es-ES,es;q=0.9',
-        'Referer': 'https://www.google.com/',
-        'DNT': '1',
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'es-EC,es;q=0.9',
+        'Referer': 'https://www.google.com.ec/',
         'Connection': 'keep-alive',
     }
     
     try:
-        session = requests.Session()
-        # Primer intento: Cargar la página
-        response = session.get(url_fuente, headers=headers, timeout=30)
+        # Usamos un tiempo de espera más largo y permitimos redirecciones
+        response = requests.get(url_fuente, headers=headers, timeout=45, allow_redirects=True)
         
         if response.status_code != 200:
-            print(f"Error de acceso: Código {response.status_code}")
+            print(f"Bloqueo detectado: Código {response.status_code}")
             return
 
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # BUSQUEDA AGRESIVA: Si no encuentra tabla, busca cualquier fila (tr) en toda la página
-        filas = soup.find_all('tr')
-        
-        if not filas or len(filas) < 2:
-            print("Aviso: No se detectó tabla estándar. Intentando búsqueda por enlaces PDF...")
-            # Plan B: Buscar todos los enlaces que contengan la palabra 'Decreto' y terminen en .pdf
-            enlaces = soup.find_all('a', href=True)
-            encontrados = 0
-            for link in enlaces:
-                url_pdf = link['href']
-                texto = link.get_text().strip()
-                if ".pdf" in url_pdf.lower() and ("decreto" in texto.lower() or "dec" in texto.lower()):
-                    guardar_en_supabase(f"Decreto Ejecutivo: {texto}", texto, url_pdf, "2024-2025")
-                    encontrados += 1
+        # Si no hay tabla, buscamos CUALQUIER enlace que diga "Decreto" y sea ".pdf"
+        enlaces_encontrados = []
+        for a in soup.find_all('a', href=True):
+            href = a['href']
+            texto = a.get_text().strip().lower()
             
-            if encontrados == 0:
-                print("Error: El servidor entregó una página vacía o protegida.")
-                return
-        else:
-            print(f"Se detectaron {len(filas)} filas. Procesando...")
-            for fila in filas:
-                cols = fila.find_all('td')
-                if len(cols) >= 3:
-                    num = cols[0].get_text(strip=True)
-                    # Saltar encabezados
-                    if "No" in num or "Nro" in num or not num: continue
-                    
-                    fec = cols[1].get_text(strip=True)
-                    asu = cols[2].get_text(strip=True)
-                    link_tag = fila.find('a', href=True)
-                    link_pdf = link_tag['href'] if link_tag else None
+            if ".pdf" in href.lower() and ("decreto" in texto or "dec" in texto or "ejecutivo" in texto):
+                enlaces_encontrados.append({
+                    "url": href,
+                    "texto": a.get_text().strip()
+                })
 
-                    if link_pdf:
-                        guardar_en_supabase(f"Decreto Ejecutivo No. {num}", asu, link_pdf, fec)
-                        time.sleep(1)
+        if not enlaces_encontrados:
+            print("El servidor sigue ocultando el contenido. Intentando extracción de respaldo...")
+            # Plan C: Buscar en los metadatos de la página
+            if "decreto" in response.text.lower():
+                print("Se detectó la palabra 'decreto' en el código, pero los enlaces están ocultos.")
+            else:
+                print("Error: Página totalmente protegida contra bots de GitHub.")
+            return
 
-        print("--- Proceso LexEC finalizado ---")
+        print(f"Se localizaron {len(enlaces_encontrados)} documentos. Sincronizando...")
+
+        for item in enlaces_encontrados:
+            # Intentar extraer un número de decreto del texto o la URL
+            titulo_final = item['texto'] if len(item['texto']) > 5 else f"Decreto Ejecutivo (Ref: {item['url'].split('/')[-1]})"
+            
+            data = {
+                "titulo": titulo_final,
+                "resumen": "Documento oficial de la Presidencia de la República.",
+                "tipo": "Decreto Ejecutivo",
+                "fecha": "Reciente",
+                "url_pdf": item['url'],
+                "institucion": "Presidencia de la República",
+                "estado": "Vigente"
+            }
+            
+            try:
+                supabase.table("normas").upsert(data, on_conflict="titulo").execute()
+                print(f"✓ Sincronizado: {titulo_final[:50]}...")
+            except Exception as e:
+                print(f"Error al guardar: {e}")
+            
+            time.sleep(1)
 
     except Exception as e:
-        print(f"Error crítico en la ejecución: {e}")
-
-def guardar_en_supabase(titulo, resumen, url, fecha):
-    try:
-        # Limpiar URL si es relativa
-        if url.startswith('/'):
-            url = "https://www.presidencia.gob.ec" + url
-            
-        data = {
-            "titulo": titulo,
-            "resumen": resumen,
-            "tipo": "Decreto Ejecutivo",
-            "fecha": fecha,
-            "url_pdf": url,
-            "institucion": "Presidencia de la República",
-            "estado": "Vigente"
-        }
-        # Evitar duplicados por título
-        supabase.table("normas").upsert(data, on_conflict="titulo").execute()
-        print(f"✓ {titulo} sincronizado.")
-    except Exception as e:
-        print(f"Error al guardar: {e}")
+        print(f"Falla técnica: {e}")
 
 if __name__ == "__main__":
     scraping_presidencia()
