@@ -10,7 +10,7 @@ key_supabase = os.environ.get("SUPABASE_SERVICE_KEY")
 supabase = create_client(url_supabase, key_supabase)
 
 def scraping_presidencia():
-    print("--- Sincronización LexEC (Modo Captura Total) ---")
+    print("--- Sincronización LexEC (Versión Compatibilidad Total) ---")
     url_fuente = "https://www.presidencia.gob.ec/decretos-ejecutivos/"
     
     headers = {
@@ -21,50 +21,47 @@ def scraping_presidencia():
         response = requests.get(url_fuente, headers=headers, timeout=30)
         html = response.text
 
-        # Este patrón busca cualquier enlace PDF sin importar el texto que tenga
-        # Captura: 1. La URL del PDF y 2. El texto del enlace
+        # Buscamos enlaces PDF
         patron = re.compile(r'href="(https?://[^"]+\.pdf)"[^>]*>(.*?)</a>', re.IGNORECASE)
         enlaces = patron.findall(html)
 
         if not enlaces:
-            print("No se encontraron enlaces PDF. El sitio podría estar usando un visor externo.")
+            print("No se encontraron enlaces PDF.")
             return
 
-        print(f"Se detectaron {len(enlaces)} documentos. Guardando todos...")
+        print(f"Se detectaron {len(enlaces)} documentos. Intentando guardado simplificado...")
 
         count = 0
         for url_pdf, texto_sucio in enlaces:
-            # Limpiamos el texto de etiquetas HTML como <strong> o <span>
             texto_limpio = re.sub(r'<[^>]+>', '', texto_sucio).strip()
             
-            # Si el texto es muy corto o vacío, usamos el nombre del archivo como título
             if len(texto_limpio) < 3:
-                nombre_archivo = url_pdf.split('/')[-1].replace('.pdf', '')
+                nombre_archivo = url_pdf.split('/')[-1].replace('.pdf', '').replace('_', ' ')
                 titulo_final = f"Decreto Ejecutivo {nombre_archivo}"
             else:
                 titulo_final = texto_limpio
 
+            # ENVIAMOS SOLO LO ESENCIAL PARA EVITAR ERRORES DE COLUMNAS FALTANTES
             data = {
                 "titulo": titulo_final,
-                "resumen": f"Documento oficial localizado en el portal de la Presidencia: {titulo_final}",
+                "resumen": f"Documento oficial: {titulo_final}",
                 "tipo": "Decreto Ejecutivo",
                 "fecha": "2026", 
                 "url_pdf": url_pdf,
-                "institucion": "Presidencia de la República",
-                "estado": "Vigente"
+                "institucion": "Presidencia de la República"
+                # HE QUITADO LA COLUMNA 'ESTADO' QUE DABA ERROR
             }
             
             try:
-                # Intentamos guardar
                 supabase.table("normas").upsert(data, on_conflict="titulo").execute()
-                print(f"✓ Guardado: {titulo_final}")
+                print(f"✓ ÉXITO: {titulo_final[:40]}...")
                 count += 1
             except Exception as e:
-                print(f"x Error al insertar {titulo_final}: {e}")
+                print(f"x Error en base de datos: {e}")
             
             time.sleep(0.5)
 
-        print(f"--- Proceso terminado. {count} documentos en base de datos ---")
+        print(f"--- Sincronización terminada. {count} documentos cargados con éxito ---")
 
     except Exception as e:
         print(f"Error técnico: {e}")
