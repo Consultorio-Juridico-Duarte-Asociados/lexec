@@ -1,11 +1,13 @@
 """
-LexEC — Robot de Decretos Ejecutivos y Resoluciones
-Fuente: presidencia.gob.ec + minka.presidencia.gob.ec
+LexEC — Robot del Registro Oficial
+Fuente: registroficial.gob.ec — PDFs con número y fecha reales
+Extrae: Decretos Ejecutivos, Resoluciones, Acuerdos Ministeriales, Ordenanzas
 Corre diariamente vía GitHub Actions.
 """
 import requests
 import re
 import os
+import json
 import time
 from bs4 import BeautifulSoup
 from supabase import create_client
@@ -17,10 +19,18 @@ supabase = create_client(
     os.environ["SUPABASE_SERVICE_KEY"]
 )
 
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
+
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     'Accept-Language': 'es-EC,es;q=0.9',
 }
+
+# URLs de las secciones del Registro Oficial
+SECCIONES_RO = [
+    "https://www.registroficial.gob.ec/245427-2/",   # Registro Oficial ordinario
+    "https://www.registroficial.gob.ec/255776-2/",   # Suplemento
+]
 
 MESES = {
     'enero':'01','febrero':'02','marzo':'03','abril':'04',
@@ -28,297 +38,322 @@ MESES = {
     'septiembre':'09','octubre':'10','noviembre':'11','diciembre':'12'
 }
 
+# Tipos de normas que queremos extraer (no leyes de Asamblea que ya tiene otro robot)
+TIPOS_OBJETIVO = [
+    'decreto ejecutivo', 'decreto ley',
+    'acuerdo ministerial', 'resolución',
+    'ordenanza', 'instructivo', 'circular',
+    'reglamento'
+]
+
 # ── Helpers ───────────────────────────────────────────────
 
 def limpiar_fecha(texto):
-    """Convierte '10 de abril de 2026' → '2026-04-10'"""
-    if not texto:
-        return str(date.today())
+    if not texto: return str(date.today())
     texto = texto.lower().strip()
-    # Formato: dd de mes de yyyy
-    m = re.search(r'(\d{1,2})\s+de\s+(\w+)\s+(?:de\s+)?(\d{4})', texto)
+    m = re.search(r'(\w+),?\s+(\d{1,2})\s+(?:de\s+)?(\w+)(?:\s+de\s+)?(\d{4})', texto)
     if m:
-        dia = m.group(1).zfill(2)
-        mes = MESES.get(m.group(2), '01')
-        return f"{m.group(3)}-{mes}-{dia}"
-    # Formato: dd/mm/yyyy
-    m2 = re.search(r'(\d{1,2})/(\d{1,2})/(\d{4})', texto)
+        dia = m.group(2).zfill(2)
+        mes = MESES.get(m.group(3), '01')
+        return f"{m.group(4)}-{mes}-{dia}"
+    m2 = re.search(r'(\d{1,2})\s+(?:de\s+)?(\w+)(?:\s+de\s+)?(\d{4})', texto)
     if m2:
-        return f"{m2.group(3)}-{m2.group(2).zfill(2)}-{m2.group(1).zfill(2)}"
-    # Formato: yyyy-mm-dd
+        dia = m2.group(1).zfill(2)
+        mes = MESES.get(m2.group(2), '01')
+        return f"{m2.group(3)}-{mes}-{dia}"
     m3 = re.search(r'(\d{4})-(\d{2})-(\d{2})', texto)
-    if m3:
-        return m3.group(0)
+    if m3: return m3.group(0)
     return str(date.today())
 
-def ya_existe(titulo=None, url_pdf=None):
-    """Verifica si ya existe en Supabase por URL de PDF o título."""
-    if url_pdf:
-        r = supabase.table("normas").select("id").eq("url_pdf", url_pdf).limit(1).execute()
-        if r.data:
-            return True
-    if titulo:
-        r = supabase.table("normas").select("id").ilike("titulo", f"%{titulo[:50]}%").limit(1).execute()
-        if r.data:
-            return True
-    return False
+def ya_existe_ro(numero_ro):
+    r = supabase.table("normas").select("id").eq("numero_ro", numero_ro).limit(1).execute()
+    return len(r.data) > 0
+
+def ya_existe_pdf(url_pdf):
+    r = supabase.table("normas").select("id").eq("url_pdf", url_pdf).limit(1).execute()
+    return len(r.data) > 0
 
 def guardar_norma(data):
-    """Guarda una norma en Supabase. Retorna True si se guardó."""
     try:
         supabase.table("normas").insert(data).execute()
         return True
     except Exception as e:
         if "duplicate" in str(e).lower() or "unique" in str(e).lower():
-            return False  # Ya existe, no es error
-        print(f"   Error guardando: {e}")
+            return False
+        print(f"   Error: {e}")
         return False
 
-# ── FUENTE 1: presidencia.gob.ec/decretos-ejecutivos ─────
-# La página tiene PDFs con links directos, no tabla
+# ── Extraer texto del PDF ─────────────────────────────────
 
-def scrapear_presidencia_decretos():
-    """
-    Extrae PDFs de decretos directamente desde presidencia.gob.ec.
-    La página tiene links a PDFs con nombres descriptivos.
-    """
-    url = "https://www.presidencia.gob.ec/decretos-ejecutivos/"
-    print(f"\n  Escaneando: {url}")
-    nuevos = 0
-
+def extraer_texto_pdf(url_pdf):
     try:
-        r = requests.get(url, headers=HEADERS, timeout=25)
+        import fitz
+        r = requests.get(url_pdf, headers=HEADERS, timeout=30)
+        r.raise_for_status()
+        with open("/tmp/ro_temp.pdf", "wb") as f:
+            f.write(r.content)
+        doc = fitz.open("/tmp/ro_temp.pdf")
+        texto = "".join(p.get_text("text") for p in doc)
+        doc.close()
+        return texto.strip() if len(texto.strip()) > 100 else None
+    except Exception as e:
+        print(f"   Error PDF: {e}")
+        return None
+
+# ── Clasificar con Gemini ─────────────────────────────────
+
+JERARQUIAS = ["Decreto Ejecutivo","Decreto Ley","Reglamento","Ordenanza",
+              "Resolución","Acuerdo Ministerial","Circular","Instructivo","Otro"]
+TEMATICAS  = ["Tributario","Laboral","Penal","Civil","Ambiental","Salud","Educación",
+              "Financiero","Administrativo","Constitucional","Comercial","Familia",
+              "Contratación Pública","Seguridad Social","Telecomunicaciones",
+              "Energía","Transporte","Agricultura","Minería","Otro"]
+
+def clasificar(texto, numero_ro):
+    if not GEMINI_KEY:
+        return None
+    prompt = f"""Analiza esta norma del Registro Oficial del Ecuador (N° {numero_ro}).
+Responde SOLO con JSON válido, sin markdown.
+
+TEXTO (primeras 3000 chars):
+{texto[:3000]}
+
+JSON:
+{{
+  "titulo": "título completo oficial de la norma",
+  "numero_norma": "número oficial (ej: Decreto Ejecutivo N° 123) o null",
+  "jerarquia": "uno de: {' | '.join(JERARQUIAS)}",
+  "origen": "institución que emite (ej: Presidencia de la República, Ministerio de...)",
+  "tematica": "una de: {' | '.join(TEMATICAS)}",
+  "vigencia": "Vigente",
+  "sumario": "resumen de 2-3 oraciones del contenido"
+}}"""
+    try:
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}",
+            json={"contents":[{"parts":[{"text":prompt}]}],
+                  "generationConfig":{"temperature":0.1,"maxOutputTokens":600}},
+            timeout=30,
+        )
+        r.raise_for_status()
+        raw = r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        raw = re.sub(r"```(?:json)?|```","",raw).strip()
+        d = json.loads(raw)
+        if d.get("jerarquia") not in JERARQUIAS: d["jerarquia"] = "Otro"
+        if d.get("tematica")  not in TEMATICAS:  d["tematica"]  = "Otro"
+        return d
+    except Exception as e:
+        print(f"   Gemini error: {e}")
+        return None
+
+def separar_normas(texto):
+    """Divide el texto de una edición en normas individuales."""
+    patron = re.compile(
+        r"(?=(?:DECRETO\s+(?:EJECUTIVO|LEY)|ACUERDO\s+MINISTERIAL|"
+        r"RESOLUCI[ÓO]N|ORDENANZA|REGLAMENTO|CIRCULAR|INSTRUCTIVO)\s)",
+        re.IGNORECASE,
+    )
+    partes = patron.split(texto)
+    return [p.strip() for p in partes if len(p.strip()) >= 150]
+
+def extraer_arts(texto, n=5):
+    arts = []
+    for m in re.finditer(
+        r"Art[íi]culo?\s*\.?\s*(\d+)[°º.]?\s*[-–]?\s*([^\n]{15,250})", texto, re.I
+    ):
+        arts.append(f"Art. {m.group(1)}: {m.group(2).strip()}")
+        if len(arts) >= n: break
+    return arts
+
+# ── Scraping del Registro Oficial ────────────────────────
+
+def obtener_ediciones_recientes(url_seccion):
+    """
+    Obtiene las ediciones recientes de una sección del RO.
+    Retorna lista de {numero_ro, fecha, url_pdf}
+    """
+    ediciones = []
+    try:
+        r = requests.get(url_seccion, headers=HEADERS, timeout=20)
+        r.raise_for_status()
         soup = BeautifulSoup(r.text, 'html.parser')
 
-        # Buscar todos los links a PDFs
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if '.pdf' not in href.lower():
-                continue
-
-            url_pdf = href if href.startswith('http') else f"https://www.presidencia.gob.ec{href}"
-
-            # Extraer número del decreto del nombre del archivo o del texto
-            texto_link = a.get_text(strip=True) or ''
-            nombre_archivo = href.split('/')[-1].replace('.pdf','').replace('-',' ').replace('_',' ')
-
-            # Buscar número de decreto
-            m_num = re.search(r'(?:decreto|DE)[_\-\s]*(?:ejecutivo[_\-\s]*)?(?:No\.?\s*)?(\d+)', 
-                            nombre_archivo + ' ' + texto_link, re.I)
-            numero = m_num.group(1) if m_num else re.search(r'\d+', nombre_archivo)
-            numero = numero.group(0) if hasattr(numero, 'group') else str(numero) if numero else '?'
-
-            titulo = f"Decreto Ejecutivo No. {numero}"
+        # Buscar bloques de edición — cada edición tiene número, fecha y link
+        # La página muestra: "Año X - Nº NNN", fecha, "Descargar"
+        for bloque in soup.find_all(['article', 'div', 'section']):
+            texto_bloque = bloque.get_text(' ', strip=True)
             
-            # Extraer descripción del nombre de archivo
-            desc = re.sub(r'decreto[_\-\s]*ejecutivo[_\-\s]*no?[_\-\s]*\d+[_\-\s]*', '', 
-                         nombre_archivo, flags=re.I).strip().title()
-            if desc:
-                titulo = f"Decreto Ejecutivo No. {numero} — {desc}"
-
-            if ya_existe(url_pdf=url_pdf):
-                print(f"   Ya existe: {titulo[:55]}")
+            # Buscar número de edición
+            m_num = re.search(r'N[°º]\s*(\d+)', texto_bloque)
+            if not m_num:
                 continue
-
-            data = {
-                "titulo":       titulo,
-                "numero_norma": f"Decreto Ejecutivo No. {numero}",
-                "numero_ro":    None,
-                "jerarquia":    "Decreto Ejecutivo",
-                "origen":       "Presidencia de la República",
-                "tematica":     "Administrativo",
-                "vigencia":     "Vigente",
-                "fecha_pub":    str(date.today()),
-                "url_pdf":      url_pdf,
-                "sumario":      f"Decreto Ejecutivo No. {numero} emitido por la Presidencia de la República del Ecuador.",
-                "metodo_ocr":   "presidencia",
-            }
-
-            if guardar_norma(data):
-                print(f"   ✓ {titulo[:65]}")
-                nuevos += 1
-
-    except Exception as e:
-        print(f"   Error: {e}")
-
-    return nuevos
-
-
-# ── FUENTE 2: minka.presidencia.gob.ec ───────────────────
-# Portal oficial con tabla de decretos estructurada
-
-def scrapear_minka():
-    """
-    Extrae decretos del portal MINKA de la Presidencia.
-    Este portal tiene una tabla estructurada con número, fecha y asunto.
-    """
-    url = "https://minka.presidencia.gob.ec/portal/usuarios_externos.jsf"
-    print(f"\n  Escaneando MINKA: {url}")
-    nuevos = 0
-
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=25)
-        if r.status_code != 200:
-            print(f"   MINKA devolvió {r.status_code}")
-            return 0
-
-        soup = BeautifulSoup(r.text, 'html.parser')
-        
-        # Buscar tabla de decretos
-        tabla = soup.find('table')
-        if not tabla:
-            print("   MINKA: no se encontró tabla")
-            return 0
-
-        filas = tabla.find_all('tr')
-        print(f"   {len(filas)} filas encontradas")
-
-        for fila in filas[1:]:  # saltar encabezado
-            cols = fila.find_all('td')
-            if len(cols) < 3:
+            
+            # Buscar fecha
+            m_fecha = re.search(
+                r'(\w+),?\s+(\d{1,2})\s+(?:de\s+)?(\w+)(?:\s+de\s+)?(\d{4})',
+                texto_bloque, re.I
+            )
+            if not m_fecha:
                 continue
-
-            num_raw    = cols[0].get_text(strip=True)
-            fecha_raw  = cols[1].get_text(strip=True)
-            asunto_raw = cols[2].get_text(strip=True)
-            link       = fila.find('a', href=True)
-
-            if not num_raw or not link:
+            
+            # Buscar link de descarga
+            link = bloque.find('a', href=True, string=re.compile(r'Descargar', re.I))
+            if not link:
+                link = bloque.find('a', href=re.compile(r'esacc|pdf', re.I))
+            if not link:
                 continue
-
+            
+            numero_ro = f"RO N° {m_num.group(1)}"
+            if "suplemento" in url_seccion.lower() or "suplemento" in texto_bloque.lower():
+                numero_ro = f"RO-S N° {m_num.group(1)}"
+            
             url_pdf = link['href']
-            if not url_pdf.startswith('http'):
-                url_pdf = f"https://minka.presidencia.gob.ec{url_pdf}"
+            fecha   = limpiar_fecha(texto_bloque)
+            
+            ediciones.append({
+                "numero_ro": numero_ro,
+                "fecha":     fecha,
+                "url_pdf":   url_pdf,
+            })
 
-            # Solo PDFs
-            if '.pdf' not in url_pdf.lower() and 'download' not in url_pdf.lower():
-                continue
+        print(f"   {len(ediciones)} ediciones encontradas en {url_seccion}")
+    except Exception as e:
+        print(f"   Error obteniendo ediciones: {e}")
+    
+    return ediciones
 
-            num_limpio = re.sub(r'(?i)decreto\s*ejecutivo\s*no?\.?\s*', '', num_raw).strip()
-            titulo     = f"Decreto Ejecutivo No. {num_limpio}"
-            if asunto_raw and len(asunto_raw) > 5:
-                titulo = f"Decreto Ejecutivo No. {num_limpio} — {asunto_raw[:80]}"
+def procesar_edicion(edicion):
+    """
+    Descarga el PDF de una edición, extrae las normas relevantes y las guarda.
+    Omite leyes orgánicas/ordinarias (esas las maneja el robot de Asamblea).
+    """
+    numero_ro = edicion["numero_ro"]
+    url_pdf   = edicion["url_pdf"]
+    fecha     = edicion["fecha"]
 
-            fecha_iso = limpiar_fecha(fecha_raw)
+    # Verificar si ya procesamos esta edición
+    if ya_existe_ro(numero_ro) or ya_existe_pdf(url_pdf):
+        print(f"   [{numero_ro}] Ya procesada.")
+        return 0
 
-            # RO en el asunto
-            m_ro = re.search(r'(?:RO|Registro Oficial)[^\d]*(\d+)', asunto_raw, re.I)
-            n_ro = f"RO N° {m_ro.group(1)}" if m_ro else None
+    print(f"\n   Procesando {numero_ro} ({fecha})...")
+    
+    texto = extraer_texto_pdf(url_pdf)
+    if not texto:
+        print(f"   Sin texto para {numero_ro}")
+        return 0
 
-            if ya_existe(url_pdf=url_pdf):
-                continue
+    print(f"   Texto: {len(texto)} chars")
 
-            data = {
-                "titulo":       titulo,
-                "numero_norma": f"Decreto Ejecutivo No. {num_limpio}",
-                "numero_ro":    n_ro,
-                "jerarquia":    "Decreto Ejecutivo",
-                "origen":       "Presidencia de la República",
-                "tematica":     "Administrativo",
-                "vigencia":     "Vigente",
-                "fecha_pub":    fecha_iso,
-                "url_pdf":      url_pdf,
-                "sumario":      asunto_raw or titulo,
-                "metodo_ocr":   "minka",
+    # Separar normas individuales dentro de la edición
+    segmentos = separar_normas(texto)
+    
+    # Si no se separaron, tratar todo como una norma
+    if not segmentos:
+        segmentos = [texto]
+    
+    print(f"   {len(segmentos)} normas detectadas")
+    guardadas = 0
+
+    for i, seg in enumerate(segmentos, 1):
+        # Detectar tipo de norma en este segmento
+        seg_lower = seg.lower()
+        
+        # Saltar si es ley orgánica u ordinaria (las maneja robot de Asamblea)
+        if re.search(r'ley\s+org[aá]nica|ley\s+ordinaria', seg_lower):
+            continue
+        
+        # Solo procesar los tipos que nos interesan
+        es_objetivo = any(tipo in seg_lower for tipo in TIPOS_OBJETIVO)
+        if not es_objetivo:
+            continue
+
+        print(f"   Clasificando norma {i}/{len(segmentos)}...")
+        c = clasificar(seg, numero_ro)
+        
+        if not c:
+            # Fallback: detectar jerarquía por palabras clave
+            if 'decreto ejecutivo' in seg_lower:
+                jerarquia = 'Decreto Ejecutivo'
+                origen    = 'Presidencia de la República'
+            elif 'acuerdo ministerial' in seg_lower:
+                jerarquia = 'Acuerdo Ministerial'
+                origen    = 'Ministerio'
+            elif 'resolución' in seg_lower:
+                jerarquia = 'Resolución'
+                origen    = None
+            elif 'ordenanza' in seg_lower:
+                jerarquia = 'Ordenanza'
+                origen    = 'GAD Municipal'
+            elif 'reglamento' in seg_lower:
+                jerarquia = 'Reglamento'
+                origen    = 'Presidencia de la República'
+            else:
+                jerarquia = 'Otro'
+                origen    = None
+            
+            # Intentar extraer título del texto
+            primera_linea = seg.strip().split('\n')[0][:120]
+            c = {
+                "titulo":    primera_linea or f"Norma del {numero_ro}",
+                "numero_norma": None,
+                "jerarquia": jerarquia,
+                "origen":    origen,
+                "tematica":  "Administrativo",
+                "vigencia":  "Vigente",
+                "sumario":   seg[:300],
             }
 
-            if guardar_norma(data):
-                print(f"   ✓ {titulo[:65]}")
-                nuevos += 1
+        arts = extraer_arts(seg)
+        
+        norma = {
+            "titulo":       c.get("titulo") or f"Norma {numero_ro} — seg. {i}",
+            "numero_ro":    numero_ro,
+            "numero_norma": c.get("numero_norma"),
+            "jerarquia":    c.get("jerarquia", "Otro"),
+            "origen":       c.get("origen"),
+            "tematica":     c.get("tematica", "Administrativo"),
+            "vigencia":     "Vigente",
+            "fecha_pub":    fecha,
+            "url_pdf":      url_pdf,
+            "sumario":      c.get("sumario"),
+            "articulos":    arts if arts else None,
+            "metodo_ocr":   "registro_oficial",
+        }
 
-    except Exception as e:
-        print(f"   Error MINKA: {e}")
+        if guardar_norma(norma):
+            print(f"   ✓ [{norma['jerarquia']}] {norma['titulo'][:60]}")
+            guardadas += 1
+        
+        time.sleep(0.3)
 
-    return nuevos
-
-
-# ── FUENTE 3: Acuerdos Ministeriales recientes ───────────
-# Algunos ministerios publican sus acuerdos en sus propios sitios
-
-def scrapear_acuerdos_ministeriales():
-    """
-    Extrae acuerdos ministeriales de ministerios que los publican abiertamente.
-    """
-    fuentes_ministerios = [
-        {
-            "url": "https://www.trabajo.gob.ec/acuerdos-ministeriales/",
-            "origen": "Ministerio de Trabajo",
-            "jerarquia": "Acuerdo Ministerial",
-        },
-        {
-            "url": "https://www.ambiente.gob.ec/acuerdos-ministeriales/",
-            "origen": "Ministerio del Ambiente",
-            "jerarquia": "Acuerdo Ministerial",
-        },
-    ]
-
-    nuevos = 0
-    for fuente in fuentes_ministerios:
-        print(f"\n  Escaneando: {fuente['url']}")
-        try:
-            r = requests.get(fuente['url'], headers=HEADERS, timeout=20)
-            if r.status_code != 200:
-                continue
-
-            soup = BeautifulSoup(r.text, 'html.parser')
-
-            for a in soup.find_all('a', href=True):
-                href = a['href']
-                if '.pdf' not in href.lower():
-                    continue
-
-                url_pdf = href if href.startswith('http') else f"{fuente['url'].split('/acuerdos')[0]}{href}"
-                texto   = a.get_text(strip=True)
-                
-                if not texto or len(texto) < 5:
-                    nombre = href.split('/')[-1].replace('.pdf','').replace('-',' ').replace('_',' ')
-                    texto  = nombre.title()
-
-                if ya_existe(url_pdf=url_pdf):
-                    continue
-
-                data = {
-                    "titulo":    f"{fuente['jerarquia']} — {texto[:100]}",
-                    "jerarquia": fuente['jerarquia'],
-                    "origen":    fuente['origen'],
-                    "tematica":  "Administrativo",
-                    "vigencia":  "Vigente",
-                    "fecha_pub": str(date.today()),
-                    "url_pdf":   url_pdf,
-                    "sumario":   texto,
-                    "metodo_ocr":"ministerio",
-                }
-
-                if guardar_norma(data):
-                    print(f"   ✓ {data['titulo'][:65]}")
-                    nuevos += 1
-
-        except Exception as e:
-            print(f"   Error {fuente['origen']}: {e}")
-        time.sleep(1)
-
-    return nuevos
-
+    return guardadas
 
 # ── MAIN ──────────────────────────────────────────────────
 
-def ejecutar_sincronizacion():
+def main():
     inicio = datetime.now()
     print(f"\n{'='*55}")
-    print(f"LexEC — Robot Presidencia — {inicio.strftime('%Y-%m-%d %H:%M')}")
+    print(f"LexEC — Robot Registro Oficial — {inicio.strftime('%Y-%m-%d %H:%M')}")
     print(f"{'='*55}")
 
     total = 0
-    total += scrapear_presidencia_decretos()
-    time.sleep(2)
-    total += scrapear_minka()
-    time.sleep(2)
-    total += scrapear_acuerdos_ministeriales()
+    
+    for seccion in SECCIONES_RO:
+        print(f"\n Sección: {seccion}")
+        ediciones = obtener_ediciones_recientes(seccion)
+        
+        for ed in ediciones[:5]:  # Procesar las 5 más recientes por sección
+            try:
+                total += procesar_edicion(ed)
+            except Exception as e:
+                print(f"   Error en {ed.get('numero_ro','?')}: {e}")
+            time.sleep(1)
 
     seg = (datetime.now() - inicio).seconds
     print(f"\n{'='*55}")
-    print(f"Completado: {total} nuevos documentos en {seg}s")
+    print(f"Completado: {total} normas nuevas en {seg}s")
     print(f"{'='*55}")
 
 if __name__ == "__main__":
-    ejecutar_sincronizacion()
+    main()
