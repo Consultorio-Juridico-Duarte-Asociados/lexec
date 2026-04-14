@@ -10,7 +10,7 @@ key_supabase = os.environ.get("SUPABASE_SERVICE_KEY")
 supabase = create_client(url_supabase, key_supabase)
 
 def scraping_presidencia():
-    print("--- Iniciando Sincronización LexEC (Protocolo de Extracción Profunda) ---")
+    print("--- Sincronización LexEC (Modo Captura Total) ---")
     url_fuente = "https://www.presidencia.gob.ec/decretos-ejecutivos/"
     
     headers = {
@@ -19,50 +19,52 @@ def scraping_presidencia():
     
     try:
         response = requests.get(url_fuente, headers=headers, timeout=30)
-        html_completo = response.text
+        html = response.text
 
-        # Usamos Expresiones Regulares para cazar los enlaces PDF y los números de decreto
-        # Aunque la tabla no se "dibuje", el enlace suele estar en el código fuente
+        # Este patrón busca cualquier enlace PDF sin importar el texto que tenga
+        # Captura: 1. La URL del PDF y 2. El texto del enlace
         patron = re.compile(r'href="(https?://[^"]+\.pdf)"[^>]*>(.*?)</a>', re.IGNORECASE)
-        enlaces = patron.findall(html_completo)
+        enlaces = patron.findall(html)
 
         if not enlaces:
-            print("No se encontraron enlaces PDF mediante patrones directos.")
+            print("No se encontraron enlaces PDF. El sitio podría estar usando un visor externo.")
             return
 
-        print(f"Se detectaron {len(enlaces)} posibles documentos. Filtrando decretos...")
+        print(f"Se detectaron {len(enlaces)} documentos. Guardando todos...")
 
         count = 0
-        for url_pdf, texto in enlaces:
-            texto_limpio = texto.replace('<strong>', '').replace('</strong>', '').strip()
+        for url_pdf, texto_sucio in enlaces:
+            # Limpiamos el texto de etiquetas HTML como <strong> o <span>
+            texto_limpio = re.sub(r'<[^>]+>', '', texto_sucio).strip()
             
-            # Solo nos interesan enlaces que mencionen "decreto" o tengan números
-            if "decreto" in texto_limpio.lower() or "dec" in texto_limpio.lower() or any(char.isdigit() for char in texto_limpio):
-                
-                # Intentamos extraer un número para el título
-                num_match = re.search(r'\d+', texto_limpio)
-                num = num_match.group() if num_match else "Nuevo"
-                
-                data = {
-                    "titulo": f"Decreto Ejecutivo No. {num}",
-                    "resumen": texto_limpio if len(texto_limpio) > 10 else "Documento oficial de la Presidencia.",
-                    "tipo": "Decreto Ejecutivo",
-                    "fecha": "2026", # Fecha aproximada
-                    "url_pdf": url_pdf,
-                    "institucion": "Presidencia de la República",
-                    "estado": "Vigente"
-                }
-                
-                try:
-                    supabase.table("normas").upsert(data, on_conflict="titulo").execute()
-                    print(f"✓ Sincronizado: Decreto {num}")
-                    count += 1
-                except Exception as e:
-                    pass # Evitamos que un error de uno detenga el resto
-                
-                time.sleep(0.5)
+            # Si el texto es muy corto o vacío, usamos el nombre del archivo como título
+            if len(texto_limpio) < 3:
+                nombre_archivo = url_pdf.split('/')[-1].replace('.pdf', '')
+                titulo_final = f"Decreto Ejecutivo {nombre_archivo}"
+            else:
+                titulo_final = texto_limpio
 
-        print(f"--- Sincronización terminada. {count} decretos procesados ---")
+            data = {
+                "titulo": titulo_final,
+                "resumen": f"Documento oficial localizado en el portal de la Presidencia: {titulo_final}",
+                "tipo": "Decreto Ejecutivo",
+                "fecha": "2026", 
+                "url_pdf": url_pdf,
+                "institucion": "Presidencia de la República",
+                "estado": "Vigente"
+            }
+            
+            try:
+                # Intentamos guardar
+                supabase.table("normas").upsert(data, on_conflict="titulo").execute()
+                print(f"✓ Guardado: {titulo_final}")
+                count += 1
+            except Exception as e:
+                print(f"x Error al insertar {titulo_final}: {e}")
+            
+            time.sleep(0.5)
+
+        print(f"--- Proceso terminado. {count} documentos en base de datos ---")
 
     except Exception as e:
         print(f"Error técnico: {e}")
