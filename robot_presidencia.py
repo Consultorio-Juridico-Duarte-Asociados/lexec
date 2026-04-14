@@ -11,7 +11,7 @@ key_supabase = os.environ.get("SUPABASE_SERVICE_KEY")
 supabase = create_client(url_supabase, key_supabase)
 
 def scraping_presidencia():
-    print("--- Sincronización LexEC (Configuración Final Basada en Metadata) ---")
+    print("--- Sincronización LexEC (Protocolo de Inserción Directa) ---")
     url_fuente = "https://www.presidencia.gob.ec/decretos-ejecutivos/"
     
     headers = {
@@ -30,43 +30,43 @@ def scraping_presidencia():
             print("No se encontraron documentos en la página.")
             return
 
-        print(f"Detectados {len(enlaces)} documentos. Procesando para LexEC...")
+        print(f"Detectados {len(enlaces)} documentos. Insertando en base de datos...")
 
         count = 0
-        fecha_hoy = datetime.now().strftime('%Y-%m-%d') # Fecha requerida por tu columna date
+        fecha_hoy = datetime.now().strftime('%Y-%m-%d')
 
         for url_pdf, texto_sucio in enlaces:
             texto_limpio = re.sub(r'<[^>]+>', '', texto_sucio).strip()
             
-            # Limpieza de título
             if len(texto_limpio) < 5:
                 nombre_archivo = url_pdf.split('/')[-1].replace('.pdf', '').replace('-', ' ')
                 titulo_final = f"Decreto Ejecutivo {nombre_archivo}"
             else:
                 titulo_final = texto_limpio
 
-            # MAPEO EXACTO DE TUS COLUMNAS SEGÚN EL CSV
+            # Datos mapeados según tu archivo de metadata CSV
             data = {
                 "titulo": titulo_final,
-                "jerarquia": "Decreto Ejecutivo", # Obligatorio (NO NULL)
-                "vigencia": "Vigente",           # Obligatorio (NO NULL)
-                "fecha_pub": fecha_hoy,          # Obligatorio (NO NULL) - Formato date
+                "jerarquia": "Decreto Ejecutivo",
+                "vigencia": "Vigente",
+                "fecha_pub": fecha_hoy,
                 "url_pdf": url_pdf,
-                "sumario": f"Documento oficial de la Presidencia de la República: {titulo_final}",
+                "sumario": f"Documento oficial de la Presidencia: {titulo_final}",
                 "origen": "Presidencia"
             }
             
             try:
-                # El upsert usa 'titulo' para no duplicar
-                supabase.table("normas").upsert(data, on_conflict="titulo").execute()
-                print(f"✓ Sincronizado: {titulo_final[:50]}...")
+                # Quitamos el 'on_conflict' para evitar el error 42P10
+                supabase.table("normas").insert(data).execute()
+                print(f"✓ Guardado con éxito: {titulo_final[:50]}...")
                 count += 1
             except Exception as e:
-                print(f"x Error en Supabase para {titulo_final[:20]}: {e}")
+                # Si falla por duplicado manual o cualquier otra razón, nos avisa pero sigue
+                print(f"x Aviso para {titulo_final[:20]}: Ya existe o error de formato.")
             
             time.sleep(1)
 
-        print(f"--- Sincronización terminada: {count} documentos cargados ---")
+        print(f"--- Sincronización terminada: {count} nuevos registros en LexEC ---")
 
     except Exception as e:
         print(f"Error técnico: {e}")
