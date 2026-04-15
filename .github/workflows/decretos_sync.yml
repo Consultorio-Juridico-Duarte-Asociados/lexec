@@ -2,29 +2,31 @@ name: Robot de Decretos LexEC
 
 on:
   schedule:
-    - cron: '0 13 * * *'   # 8:00 AM Ecuador — después del robot de leyes
+    # Se ejecuta todos los días a las 12:00 UTC (07:00 AM hora Ecuador)
+    - cron: '0 12 * * *'
   workflow_dispatch:
+    # Esto mantiene el botón de "Run workflow" para que puedas activarlo manualmente cuando quieras
 
 jobs:
-  decretos:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 25
+  build:
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Descargar el código
-        uses: actions/checkout@v4
+      - name: Checkout del repositorio
+        uses: actions/checkout@v3
 
       - name: Configurar Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: '3.9'
 
       - name: Instalar dependencias
-        run: pip install requests beautifulsoup4 supabase PyMuPDF
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 supabase
 
-      - name: Ejecutar robot del Registro Oficial
+      - name: Ejecutar robot de presidencia
         env:
-          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          GEMINI_API_KEY:       ${{ secrets.GEMINI_API_KEY }}
         run: python robot_presidencia.py
