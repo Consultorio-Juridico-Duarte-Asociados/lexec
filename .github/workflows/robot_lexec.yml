@@ -1,0 +1,44 @@
+name: 🤖 LexEC Robot Multi-fuente
+
+on:
+  schedule:
+    # Corre 4 veces al día: 6am, 12pm, 6pm, 11pm hora Ecuador (UTC+5)
+    - cron: '0 11 * * *'   # 6am Ecuador
+    - cron: '0 17 * * *'   # 12pm Ecuador
+    - cron: '0 23 * * *'   # 6pm Ecuador
+    - cron: '0 4  * * *'   # 11pm Ecuador
+  workflow_dispatch:
+    inputs:
+      fuente:
+        description: 'Fuente a scrapear (dejar vacío = todas)'
+        required: false
+        default: 'todas'
+
+jobs:
+  extraer:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🐍 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 Instalar dependencias
+        run: |
+          pip install requests beautifulsoup4 supabase lxml
+
+      - name: 🤖 Ejecutar Robot Multi-fuente
+        env:
+          SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python robot_lexec.py
+
+      - name: 📊 Resumen
+        if: always()
+        run: echo "✅ Robot completado — revisar logs para detalle de normas extraídas"
