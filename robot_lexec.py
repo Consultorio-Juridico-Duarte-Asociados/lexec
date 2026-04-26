@@ -1,28 +1,67 @@
 #!/usr/bin/env python3
 """
-LexEC Robot Multi-fuente v4
-Columnas exactas según schema Supabase real:
-codigo_unico, numero_ro, titulo, tipo, jerarquia, jerarquia_nombre,
-fecha_publicacion, fecha_extraccion, registro_oficial, fuente,
-url_fuente, url_pdf, resumen, etiquetas, estado, activo, verificado
+LexEC Robot v5 — usa requests directamente, sin librería supabase
+Evita problemas de compatibilidad con nuevas versiones de Supabase
 """
 
-import os, re, time, hashlib
+import os, re, time, hashlib, json
 from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
-from supabase import create_client
 
-supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"])
-
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-           "AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36"}
-
+# ── Config ─────────────────────────────────────────────────────────────────────
+SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
+SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
+HEADERS_SB   = {
+    "apikey":        SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type":  "application/json",
+    "Prefer":        "return=minimal",
+}
+HEADERS_WEB = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+               "AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36"}
 MESES = {"enero":"01","febrero":"02","marzo":"03","abril":"04","mayo":"05",
          "junio":"06","julio":"07","agosto":"08","septiembre":"09",
          "octubre":"10","noviembre":"11","diciembre":"12"}
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Supabase helpers ───────────────────────────────────────────────────────────
+def sb_get(table, params=""):
+    r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}?{params}",
+                     headers=HEADERS_SB, timeout=30)
+    if r.status_code == 200:
+        return r.json()
+    print(f"  ⚠ GET {table}: {r.status_code} {r.text[:100]}")
+    return []
+
+def sb_insert(table, data):
+    r = requests.post(f"{SUPABASE_URL}/rest/v1/{table}",
+                      headers=HEADERS_SB,
+                      data=json.dumps(data), timeout=30)
+    return r.status_code in (200, 201)
+
+def get_existentes():
+    rows = sb_get("normas", "select=codigo_unico&limit=5000")
+    return {r["codigo_unico"] for r in rows if r.get("codigo_unico")}
+
+def insertar(norma, existentes):
+    cod = norma.get("codigo_unico","")
+    if not cod or cod in existentes:
+        return False
+    if sb_insert("normas", norma):
+        existentes.add(cod)
+        return True
+    return False
+
+def log_extraccion(fuente, cantidad, detalles):
+    sb_insert("extracciones", {
+        "fecha":    datetime.now().isoformat(),
+        "fuente":   fuente,
+        "cantidad": cantidad,
+        "estado":   "exitoso",
+        "detalles": detalles,
+    })
+
+# ── Helpers generales ──────────────────────────────────────────────────────────
 def limpiar_fecha(texto):
     if not texto: return datetime.now().strftime("%Y-%m-%d")
     t = texto.lower().strip()
@@ -44,58 +83,27 @@ def limpiar_ro(texto):
         return f"RO-S N° {m.group(1)}" if sup else f"RO N° {m.group(1)}"
     return ""
 
-def gen_codigo(prefijo, num, año=""):
-    """Genera codigo_unico único y legible."""
-    base = re.sub(r"[^a-z0-9]", "-", (prefijo + "-" + str(num)).lower())
-    base = re.sub(r"-+", "-", base).strip("-")[:60]
-    return f"{base}-{año}" if año else base
-
 def get_soup(url):
     try:
-        r = requests.get(url, headers=HEADERS, timeout=25)
+        r = requests.get(url, headers=HEADERS_WEB, timeout=25)
         r.raise_for_status()
         return BeautifulSoup(r.text, "html.parser")
     except Exception as e:
         print(f"  ⚠ {url}: {e}")
         return None
 
-def get_existentes():
-    try:
-        res = supabase.table("normas").select("codigo_unico").execute()
-        return {r["codigo_unico"] for r in (res.data or [])}
-    except Exception as e:
-        print(f"  ⚠ Error leyendo existentes: {e}")
-        return set()
-
-def insertar(norma, existentes):
-    cod = norma.get("codigo_unico", "")
-    if not cod or cod in existentes:
-        return False
-    try:
-        supabase.table("normas").insert(norma).execute()
-        existentes.add(cod)
-        return True
-    except Exception as e:
-        if "duplicate" in str(e).lower() or "23505" in str(e):
-            existentes.add(cod)
-        else:
-            print(f"  ⚠ {e}")
-        return False
-
-def norma(codigo_unico, titulo, tipo, jerarquia, jerarquia_nombre,
-          fecha, fuente, url_fuente, url_pdf, resumen,
-          numero_ro="", registro_oficial="", etiquetas=None):
-    """Construye norma con columnas EXACTAS del schema Supabase."""
+def mk_norma(cod, titulo, tipo, jerarquia, jnombre, fecha, fuente,
+             url_fuente, url_pdf, resumen, numero_ro="", etiquetas=None):
     return {
-        "codigo_unico":     codigo_unico,
+        "codigo_unico":     cod,
         "numero_ro":        numero_ro,
         "titulo":           titulo[:400],
         "tipo":             tipo,
         "jerarquia":        jerarquia,
-        "jerarquia_nombre": jerarquia_nombre,
+        "jerarquia_nombre": jnombre,
         "fecha_publicacion": fecha,
         "fecha_extraccion":  datetime.now().isoformat(),
-        "registro_oficial":  registro_oficial,
+        "registro_oficial":  numero_ro,
         "fuente":           fuente,
         "url_fuente":       url_fuente,
         "url_pdf":          url_pdf,
@@ -105,15 +113,6 @@ def norma(codigo_unico, titulo, tipo, jerarquia, jerarquia_nombre,
         "activo":           True,
         "verificado":       False,
     }
-
-def log(fuente, cantidad, detalles):
-    try:
-        supabase.table("extracciones").insert({
-            "fecha": datetime.now().isoformat(),
-            "fuente": fuente, "cantidad": cantidad,
-            "estado": "exitoso", "detalles": detalles,
-        }).execute()
-    except: pass
 
 # ── FUENTE 1: Presidencia ──────────────────────────────────────────────────────
 def scrape_presidencia(ex):
@@ -128,31 +127,19 @@ def scrape_presidencia(ex):
         for fila in soup.find_all("tr"):
             cols = fila.find_all("td")
             if len(cols) < 3: continue
-            num_raw   = cols[0].get_text(strip=True)
-            fecha_raw = cols[1].get_text(strip=True)
-            asunto    = cols[2].get_text(strip=True)
+            num_raw, fecha_raw, asunto = (cols[i].get_text(strip=True) for i in range(3))
             link = fila.find("a", href=True)
             if not link or ".pdf" not in link["href"].lower(): continue
             num = re.sub(r"[^\d]", "", num_raw)
             if not num: continue
-            titulo = f"Decreto Ejecutivo No. {num}"
             cod = f"DE-{num}-{limpiar_fecha(fecha_raw)[:4]}"
-            n = norma(
-                codigo_unico    = cod,
-                titulo          = titulo,
-                tipo            = "Decreto Ejecutivo",
-                jerarquia       = 4,
-                jerarquia_nombre= "Decreto Ejecutivo",
-                fecha           = limpiar_fecha(fecha_raw),
-                fuente          = "Presidencia de la República",
-                url_fuente      = url,
-                url_pdf         = link["href"],
-                resumen         = asunto[:600],
-                numero_ro       = limpiar_ro(asunto),
-                etiquetas       = ["presidencia", "decreto-ejecutivo"],
-            )
+            n = mk_norma(cod, f"Decreto Ejecutivo No. {num}", "Decreto Ejecutivo",
+                         4, "Decreto Ejecutivo", limpiar_fecha(fecha_raw),
+                         "Presidencia de la República", url, link["href"],
+                         asunto[:600], limpiar_ro(asunto),
+                         ["presidencia","decreto-ejecutivo"])
             if insertar(n, ex):
-                print(f"  ✅ {titulo}")
+                print(f"  ✅ Decreto {num}")
                 nuevos += 1; total += 1
         if nuevos == 0 and p > 1: break
         time.sleep(1.5)
@@ -162,19 +149,17 @@ def scrape_presidencia(ex):
 def scrape_asamblea(ex):
     print("\n📌 FUENTE 2: Asamblea Nacional")
     total = 0
-    url = "https://www.asambleanacional.gob.ec/es/leyes-aprobadas"
-    soup = get_soup(url)
+    soup = get_soup("https://www.asambleanacional.gob.ec/es/leyes-aprobadas")
     if not soup: return 0
     for row in soup.find_all("tr"):
-        pdf_link = row.find("a", href=lambda h: h and ".pdf" in h.lower())
-        if not pdf_link: continue
+        pdf = row.find("a", href=lambda h: h and ".pdf" in h.lower())
+        if not pdf: continue
         cells = row.find_all("td")
         titulo = " ".join(c.get_text(strip=True) for c in cells).strip()[:300]
         if not titulo or len(titulo) < 15: continue
-        href = pdf_link["href"]
+        href = pdf["href"]
         if not href.startswith("http"):
             href = "https://www.asambleanacional.gob.ec" + href
-        # Extraer número de ley y año
         num_m = re.search(r"^(\d+)\s", titulo)
         num = num_m.group(1) if num_m else hashlib.md5(titulo.encode()).hexdigest()[:6]
         fecha_m = re.search(r"\d{2}-\d{2}-\d{4}", titulo)
@@ -182,21 +167,10 @@ def scrape_asamblea(ex):
         ro = limpiar_ro(titulo)
         tipo = "Ley Orgánica" if "orgánica" in titulo.lower() else "Ley Ordinaria"
         cod = f"AN-LEY-{num}-{fecha[:4]}"
-        n = norma(
-            codigo_unico    = cod,
-            titulo          = titulo,
-            tipo            = tipo,
-            jerarquia       = 3,
-            jerarquia_nombre= tipo,
-            fecha           = fecha,
-            fuente          = "Asamblea Nacional",
-            url_fuente      = url,
-            url_pdf         = href,
-            resumen         = titulo,
-            numero_ro       = ro,
-            registro_oficial= ro,
-            etiquetas       = ["asamblea-nacional", "ley"],
-        )
+        n = mk_norma(cod, titulo, tipo, 3, tipo, fecha,
+                     "Asamblea Nacional",
+                     "https://www.asambleanacional.gob.ec/es/leyes-aprobadas",
+                     href, titulo, ro, ["asamblea-nacional","ley"])
         if insertar(n, ex):
             print(f"  ✅ {titulo[:80]}")
             total += 1
@@ -218,21 +192,14 @@ def scrape_trabajo(ex):
         fecha_m = re.search(r"(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})", titulo.lower())
         fecha = limpiar_fecha(fecha_m.group(0) if fecha_m else f"01 de enero de {año}")
         cod = f"MDT-AM-{año}-{num}"
-        n = norma(
-            codigo_unico    = cod,
-            titulo          = titulo[:300],
-            tipo            = "Acuerdo Ministerial",
-            jerarquia       = 5,
-            jerarquia_nombre= "Acuerdo Ministerial",
-            fecha           = fecha,
-            fuente          = "Ministerio del Trabajo",
-            url_fuente      = "https://www.trabajo.gob.ec/acuerdos-ministeriales/",
-            url_pdf         = href if ".pdf" in href.lower() else "",
-            resumen         = titulo[:600],
-            etiquetas       = ["trabajo", "acuerdo-ministerial", f"mdt-{año}"],
-        )
+        n = mk_norma(cod, titulo[:300], "Acuerdo Ministerial", 5,
+                     "Acuerdo Ministerial", fecha,
+                     "Ministerio del Trabajo",
+                     "https://www.trabajo.gob.ec/acuerdos-ministeriales/",
+                     href if ".pdf" in href.lower() else "",
+                     titulo[:600], "", ["trabajo","acuerdo-ministerial"])
         if insertar(n, ex):
-            print(f"  ✅ {titulo[:80]}")
+            print(f"  ✅ MDT-{año}-{num}")
             total += 1
     return total
 
@@ -255,21 +222,16 @@ def scrape_sercop(ex):
             if not href.startswith("http"):
                 href = "https://portal.compraspublicas.gob.ec" + href
             num_m = re.search(r"(?:RE|RESOLUCION|Resolucion)[^\d]*(\d+)", titulo, re.IGNORECASE)
-            num = num_m.group(1) if num_m else re.search(r"\d{3,}", titulo).group(0)
-            cod = f"SERCOP-RES-{num}"
-            n = norma(
-                codigo_unico    = cod,
-                titulo          = titulo[:300],
-                tipo            = "Resolución",
-                jerarquia       = 5,
-                jerarquia_nombre= "Resolución SERCOP",
-                fecha           = datetime.now().strftime("%Y-%m-%d"),
-                fuente          = "SERCOP",
-                url_fuente      = href,
-                url_pdf         = href if ".pdf" in href.lower() else "",
-                resumen         = titulo[:600],
-                etiquetas       = ["sercop", "contratacion-publica"],
-            )
+            if not num_m:
+                num_m = re.search(r"\d{3,}", titulo)
+            num = num_m.group(0) if num_m else ""
+            cod = f"SERCOP-{re.sub(r'[^a-z0-9]','-',num.lower())}"
+            n = mk_norma(cod, titulo[:300], "Resolución", 5,
+                         "Resolución SERCOP",
+                         datetime.now().strftime("%Y-%m-%d"),
+                         "SERCOP", href,
+                         href if ".pdf" in href.lower() else "",
+                         titulo[:600], "", ["sercop","contratacion-publica"])
             if insertar(n, ex):
                 print(f"  ✅ {titulo[:70]}")
                 total += 1
@@ -284,31 +246,22 @@ def scrape_salud(ex):
     if not soup: return 0
     for link in soup.find_all("a", href=True):
         href = link["href"]
-        # Solo PDFs directos
         if ".pdf" not in href.lower(): continue
         titulo = link.get_text(strip=True)
         if not titulo or len(titulo) < 5:
-            # Buscar texto en el padre
             p = link.find_parent(["li","tr","div","td","article"])
-            if p: titulo = p.get_text(strip=True)[:200]
+            if p: titulo = p.get_text(separator=" ", strip=True)[:200]
         if not titulo or len(titulo) < 5: continue
         if not href.startswith("http"): href = "https://www.salud.gob.ec" + href
         num_m = re.search(r"AM[_\-\s]*(\d+)|(\d{4})[_\-](\d{3,})", titulo)
         num = num_m.group(0).replace(" ","") if num_m else hashlib.md5(href.encode()).hexdigest()[:8]
         cod = f"MSP-AM-{re.sub(r'[^a-z0-9]','-',num.lower())}"
-        n = norma(
-            codigo_unico    = cod,
-            titulo          = titulo[:300],
-            tipo            = "Acuerdo Ministerial",
-            jerarquia       = 5,
-            jerarquia_nombre= "Acuerdo Ministerial de Salud",
-            fecha           = datetime.now().strftime("%Y-%m-%d"),
-            fuente          = "Ministerio de Salud Pública",
-            url_fuente      = "https://www.salud.gob.ec/acuerdos-ministeriales/",
-            url_pdf         = href,
-            resumen         = titulo[:600],
-            etiquetas       = ["salud", "acuerdo-ministerial"],
-        )
+        n = mk_norma(cod, titulo[:300], "Acuerdo Ministerial", 5,
+                     "Acuerdo Ministerial de Salud",
+                     datetime.now().strftime("%Y-%m-%d"),
+                     "Ministerio de Salud Pública",
+                     "https://www.salud.gob.ec/acuerdos-ministeriales/",
+                     href, titulo[:600], "", ["salud","acuerdo-ministerial"])
         if insertar(n, ex):
             print(f"  ✅ {titulo[:70]}")
             total += 1
@@ -327,32 +280,21 @@ def scrape_judicatura(ex):
         for link in soup.find_all("a", href=True):
             href = link["href"]
             if ".pdf" not in href.lower(): continue
-            # Buscar título real en el contenedor padre
             parent = link.find_parent(["tr","li","div","article","td"])
             titulo = parent.get_text(separator=" ", strip=True)[:200] if parent else link.get_text(strip=True)
             titulo = re.sub(r"\s+", " ", titulo).strip()
             if not titulo or len(titulo) < 10: continue
-            # Excluir no-resoluciones
-            if titulo.lower() in ["ver documento","descargar","pdf","ver","informe de labores"]: continue
             if re.match(r"^(PAC|Informe|Memoria)\s+\d{4}", titulo): continue
             if not href.startswith("http"):
                 href = "https://www.funcionjudicial.gob.ec" + href
             num_m = re.search(r"\d{3,4}-\d{4}", titulo)
             num = num_m.group(0) if num_m else hashlib.md5(href.encode()).hexdigest()[:8]
             cod = f"FJ-RES-{num}"
-            n = norma(
-                codigo_unico    = cod,
-                titulo          = titulo[:300],
-                tipo            = "Resolución",
-                jerarquia       = 5,
-                jerarquia_nombre= "Resolución del Consejo de la Judicatura",
-                fecha           = datetime.now().strftime("%Y-%m-%d"),
-                fuente          = "Consejo de la Judicatura",
-                url_fuente      = url,
-                url_pdf         = href,
-                resumen         = titulo[:600],
-                etiquetas       = ["judicatura","resolucion"],
-            )
+            n = mk_norma(cod, titulo[:300], "Resolución", 5,
+                         "Resolución del Consejo de la Judicatura",
+                         datetime.now().strftime("%Y-%m-%d"),
+                         "Consejo de la Judicatura", url, href,
+                         titulo[:600], "", ["judicatura","resolucion"])
             if insertar(n, ex):
                 print(f"  ✅ {titulo[:70]}")
                 total += 1
@@ -363,10 +305,11 @@ def scrape_judicatura(ex):
 def main():
     t0 = time.time()
     print("=" * 65)
-    print("🤖 LexEC Robot Multi-fuente v4")
+    print("🤖 LexEC Robot Multi-fuente v5 (requests directo)")
     print(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}")
     print("=" * 65)
 
+    print("🔑 Verificando conexión a Supabase...")
     existentes = get_existentes()
     print(f"📚 Normas existentes: {len(existentes)}\n")
 
@@ -395,8 +338,8 @@ def main():
         print(f"  {'✅' if n > 0 else '➖'} {nombre}: {n} normas")
     print(f"\n🎉 TOTAL: {total} normas nuevas — {dur}s")
     print("=" * 65)
-    log("GitHub Actions", total,
-        f"{total} normas. " + " | ".join(f"{k}:{v}" for k,v in resultados.items() if v > 0))
+    log_extraccion("GitHub Actions", total,
+        f"v5 — {total} normas. " + " | ".join(f"{k}:{v}" for k,v in resultados.items() if v > 0))
 
 if __name__ == "__main__":
     main()
