@@ -31,7 +31,7 @@ jobs:
 
       - name: 📦 Instalar dependencias
         run: |
-          pip install requests beautifulsoup4 supabase lxml
+          pip install requests beautifulsoup4 lxml
 
       - name: 🤖 Ejecutar Robot Multi-fuente
         env:
