@@ -12,15 +12,13 @@ from bs4 import BeautifulSoup
 # ── Config ─────────────────────────────────────────────────────────────────────
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
-# Support both legacy JWT keys and new sb_secret_ keys
-_is_new_key = SUPABASE_KEY.startswith("sb_")
-HEADERS_SB   = {
+# Both legacy JWT and new sb_secret_ keys need apikey header
+HEADERS_SB = {
+    "apikey":        SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
     "Content-Type":  "application/json",
     "Prefer":        "return=minimal",
 }
-if not _is_new_key:
-    HEADERS_SB["apikey"] = SUPABASE_KEY
 HEADERS_WEB = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                "AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36"}
 MESES = {"enero":"01","febrero":"02","marzo":"03","abril":"04","mayo":"05",
@@ -250,11 +248,13 @@ def scrape_salud(ex):
     for link in soup.find_all("a", href=True):
         href = link["href"]
         if ".pdf" not in href.lower(): continue
-        titulo = link.get_text(strip=True)
-        if not titulo or len(titulo) < 5:
-            p = link.find_parent(["li","tr","div","td","article"])
-            if p: titulo = p.get_text(separator=" ", strip=True)[:200]
-        if not titulo or len(titulo) < 5: continue
+        # Get title from parent container
+        p = link.find_parent(["li","tr","div","td","article","p"])
+        titulo = p.get_text(separator=" ", strip=True)[:200] if p else link.get_text(strip=True)
+        titulo = re.sub(r"\s+", " ", titulo).strip()
+        # Must have a real document number
+        if not re.search(r"\d{3,}", titulo): continue
+        if titulo.lower() in ["click aquí","ver documento","descargar","ver más"]: continue
         if not href.startswith("http"): href = "https://www.salud.gob.ec" + href
         num_m = re.search(r"AM[_\-\s]*(\d+)|(\d{4})[_\-](\d{3,})", titulo)
         num = num_m.group(0).replace(" ","") if num_m else hashlib.md5(href.encode()).hexdigest()[:8]
@@ -288,6 +288,8 @@ def scrape_judicatura(ex):
             titulo = re.sub(r"\s+", " ", titulo).strip()
             if not titulo or len(titulo) < 10: continue
             if re.match(r"^(PAC|Informe|Memoria)\s+\d{4}", titulo): continue
+            if titulo.lower() in ["ver documento","descargar","ver más","ver","download"]: continue
+            if not re.search(r"\d{3,}", titulo): continue
             if not href.startswith("http"):
                 href = "https://www.funcionjudicial.gob.ec" + href
             num_m = re.search(r"\d{3,4}-\d{4}", titulo)
@@ -313,6 +315,10 @@ def main():
     print("=" * 65)
 
     print("🔑 Verificando conexión a Supabase...")
+    print(f"   URL: {SUPABASE_URL}")
+    print(f"   KEY tipo: {'sb_secret' if SUPABASE_KEY.startswith('sb_') else 'JWT legacy'}")
+    print(f"   KEY longitud: {len(SUPABASE_KEY)} chars")
+    print(f"   KEY inicio: {SUPABASE_KEY[:20]}...")
     existentes = get_existentes()
     print(f"📚 Normas existentes: {len(existentes)}\n")
 
