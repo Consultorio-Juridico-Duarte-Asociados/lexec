@@ -12,12 +12,15 @@ from bs4 import BeautifulSoup
 # ── Config ─────────────────────────────────────────────────────────────────────
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
+# Support both legacy JWT keys and new sb_secret_ keys
+_is_new_key = SUPABASE_KEY.startswith("sb_")
 HEADERS_SB   = {
-    "apikey":        SUPABASE_KEY,
     "Authorization": f"Bearer {SUPABASE_KEY}",
     "Content-Type":  "application/json",
     "Prefer":        "return=minimal",
 }
+if not _is_new_key:
+    HEADERS_SB["apikey"] = SUPABASE_KEY
 HEADERS_WEB = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                "AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36"}
 MESES = {"enero":"01","febrero":"02","marzo":"03","abril":"04","mayo":"05",
