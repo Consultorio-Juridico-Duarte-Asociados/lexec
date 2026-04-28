@@ -29,7 +29,7 @@ REFORMAS = [
         "titulo_contiene": "constitución",
         "fecha_reforma": "2024-05-30",
         "ultimo_ro": "Tercer Suplemento RO 568, 30-V-2024",
-        "url_pdf": "https://www.oas.org/juridico/mla/sp/ecu/sp_ecu-int-text-const.pdf",
+        "url_pdf": "https://www.asambleanacional.gob.ec/sites/default/files/documents/old/constitucion_de_bolsillo.pdf",
         "descripcion": "Última reforma constitucional — RO 568 Tercer Suplemento 2024"
     },
     {
@@ -37,7 +37,7 @@ REFORMAS = [
         "titulo_contiene": "código orgánico integral penal",
         "fecha_reforma": "2023-09-21",
         "ultimo_ro": "Segundo Suplemento RO 385, 21-IX-2023",
-        "url_pdf": "https://www.defensa.gob.ec/wp-content/uploads/downloads/2023/09/COIP-reformado-2023.pdf",
+        "url_pdf": "https://biblioteca.defensoria.gob.ec/bitstream/handle/37000/4096/C%C3%B3digo%20Org%C3%A1nico%20Integral%20Penal%2c%20COIP.%20Act.%20agosto%202023.pdf",
         "descripcion": "Reforma COIP — Ley de Seguridad Ciudadana 2023"
     },
     {
@@ -190,14 +190,20 @@ def fecha_str_to_date(s):
         return date(2000, 1, 1)
 
 def verificar_pdf_activo(url):
-    """Verifica si un PDF URL responde correctamente."""
+    """Verifica si un PDF URL existe (no 404/410).
+    403 = bloqueado para bots pero puede existir para usuarios = True
+    404/410 = no existe = False
+    """
     if not url or not url.startswith("http"):
         return False
     try:
-        r = requests.head(url, timeout=10, allow_redirects=True)
-        return r.status_code == 200
+        r = requests.head(url, timeout=10, allow_redirects=True,
+                         headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"})
+        # 403 = exists but blocked for bots (still valid for users)
+        # 404/410 = truly missing
+        return r.status_code not in (404, 410, 500, 503)
     except:
-        return False
+        return False  # connection error = possibly down
 
 def buscar_pdf_en_registro_oficial(titulo_palabras):
     """Busca en el Registro Oficial por palabras clave del título."""
@@ -379,6 +385,22 @@ def main():
     print(f"  ❌ Errores:               {stats['errores']}")
     print(f"\n⏱️  Tiempo total: {dur}s")
     print("=" * 65)
+
+    # Check for truly broken PDFs (404) and log them
+    print("\n🔗 Verificando PDFs rotos (404)...")
+    broken = 0
+    for norma in normas[:50]:  # Check first 50 to avoid timeout
+        url = (norma.get("url_pdf") or "").strip()
+        if url and not verificar_pdf_activo(url):
+            broken += 1
+            print(f"  🔴 PDF roto: {norma.get('titulo','')[:60]}")
+            print(f"     URL: {url[:80]}")
+            # Mark as needing update
+            sb_patch("normas", norma["id"], {
+                "resumen": f"⚠️ PDF no disponible. URL original: {url[:200]}"
+            })
+        time.sleep(0.2)
+    print(f"  PDFs rotos encontrados: {broken}")
 
     # Log en Supabase
     total_issues = stats["posible_actualizacion"] + stats["desactualizada"]
