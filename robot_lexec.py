@@ -44,9 +44,27 @@ def get_existentes():
     rows = sb_get("normas", "select=codigo_unico&limit=5000")
     return {r["codigo_unico"] for r in rows if r.get("codigo_unico")}
 
+def tiene_pdf_valido(url):
+    """Verifica que la URL sea un PDF real, no una página web."""
+    if not url: return False
+    url = url.lower()
+    # Must end in .pdf OR be a known PDF-serving domain
+    if url.endswith(".pdf"): return True
+    # Some URLs have .pdf in the middle with parameters
+    if ".pdf?" in url or ".pdf#" in url: return True
+    return False
+
 def insertar(norma, ex):
     cod = norma.get("codigo_unico","")
     if not cod or cod in ex: return False
+    # Solo guardar si tiene PDF válido
+    url_pdf = norma.get("url_pdf","")
+    if not tiene_pdf_valido(url_pdf):
+        norma["url_pdf"] = ""  # Limpiar URL no-PDF
+        # Solo guardar si tiene url_fuente válida (para "Ver en línea")
+        url_fuente = norma.get("url_fuente","")
+        if not url_fuente or not url_fuente.startswith("http"):
+            return False  # Sin PDF ni fuente = no guardar
     if sb_insert("normas", norma):
         ex.add(cod); return True
     return False
