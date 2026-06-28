@@ -134,12 +134,16 @@ def insertar(norma, ex):
     return False
 
 def log(fuente, cantidad, detalles):
-    sb_insert("extracciones", {
-        "fecha": datetime.now().isoformat(),
-        "fuente": fuente,
-        "cantidad": cantidad,
-        "estado": "exitoso",
-        "detalles": detalles,
+    """Registra resultado en scraper_logs (tabla definida en supabase_schema.sql)."""
+    sb_insert("scraper_logs", {
+        "nivel": "INFO",
+        "mensaje": f"{fuente} — {cantidad} normas insertadas",
+        "detalle": {
+            "fecha": datetime.now().isoformat(),
+            "fuente": fuente,
+            "cantidad": cantidad,
+            "detalles": detalles,
+        },
     })
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -176,7 +180,7 @@ def limpiar_fecha(t, año_fallback=None):
     if m4:
         return f"{m4.group(2)}-{m4.group(1)}-01"
 
-    return f"{año_fallback}-01-01" if año_fallback else datetime.now().strftime("%Y-%m-%d")
+    return f"{año_fallback}-01-01" if año_fallback else None
 
 def limpiar_ro(t):
     if not t:
@@ -235,9 +239,10 @@ def get_soup(url, fuente_nombre=""):
 
 def mk(cod, titulo, tipo, jerarquia, jnombre, fecha, fuente,
        url_fuente, url_pdf, resumen, numero_ro="", etiquetas=None):
-    # Fecha fallback segura
+    # Fecha fallback: solo usar hoy si absolutamente no hay otra opción
+    # (la fecha de extracción siempre es hoy, la de publicación debe ser real)
     if not fecha:
-        fecha = datetime.now().strftime("%Y-%m-%d")
+        fecha = None  # Supabase acepta NULL; mejor NULL que fecha incorrecta
     return {
         "codigo_unico": cod,
         "numero_ro": numero_ro,
@@ -459,7 +464,7 @@ def scrape_sercop(ex):
             # url_fuente = página de listado, NO el PDF
             n = mk(cod, titulo[:300],
                    "Resolución", 5, "Acuerdos y Resoluciones",
-                   datetime.now().strftime("%Y-%m-%d"),
+                   None,  # fecha desconocida — mejor NULL que fecha incorrecta
                    "SERCOP", url_base, href,
                    titulo[:600], "",
                    ["sercop", "contratacion-publica"])

@@ -8,9 +8,12 @@ import os, re, json, time, requests
 from datetime import date, datetime
 from bs4 import BeautifulSoup
 
+# Nota: LEYES_URL se usa en procesar_ley() para url_fuente
+# Se define más abajo junto a BASE_URL — Python lo resuelve en tiempo de ejecución
+
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
-GEMINI_KEY   = os.environ["GEMINI_API_KEY"]
+GEMINI_KEY   = os.environ.get("GEMINI_API_KEY", "")  # Opcional — sin él usa fallback por título
 
 BASE_URL    = "https://www.asambleanacional.gob.ec"
 LEYES_URL   = f"{BASE_URL}/es/leyes-aprobadas"
@@ -47,22 +50,27 @@ def sb_insert(tabla, datos):
     return r.json()
 
 def ya_existe(titulo):
-    """Verifica si la ley ya está en la BD buscando por título."""
-    titulo_buscar = titulo[:60].replace("'", "''")
+    """Verifica si la ley ya está en la BD buscando por título.
+    Escapa caracteres especiales de SQL para evitar falsos positivos."""
+    # Quitar caracteres que ilike interpreta como comodines o causan errores
+    titulo_limpio = re.sub(r"[%_\\]", "", titulo[:40]).strip()
+    if not titulo_limpio:
+        return False
     data = sb_get("normas", params={
-        "titulo": f"ilike.*{titulo_buscar[:40]}*",
+        "titulo": f"ilike.*{titulo_limpio}*",
         "select": "id",
         "limit": 1,
     })
     return len(data) > 0
 
 def log(nivel, msg, detalle=None):
+    """Log en tabla scraper_logs (definida en supabase_schema.sql)."""
     try:
         sb_insert("scraper_logs", {
             "nivel": nivel, "mensaje": msg, "detalle": detalle
         })
     except Exception:
-        pass
+        pass  # Logs no son críticos
 
 # ── Scraping de la Asamblea Nacional ─────────────────────
 
@@ -82,7 +90,7 @@ def parsear_fecha_ro(texto_ro):
     m2 = re.search(r"(\d{4})-(\d{2})-(\d{2})", texto_ro)
     if m2:
         return m2.group(0)
-    return str(date.today())
+    return None  # NULL en BD es mejor que fecha incorrecta
 
 def extraer_numero_ro(texto_ro):
     """Extrae el número del Registro Oficial. Ej: 'R.O. No. 236' → 'RO N° 236'"""
@@ -226,7 +234,17 @@ TEMATICAS = [
 ]
 
 def clasificar(titulo, texto=None):
-    """Clasifica la ley con Gemini. Usa el texto si está disponible."""
+    """Clasifica la ley con Gemini. Usa el texto si está disponible.
+    Si GEMINI_KEY no está configurado, usa clasificación por título."""
+    # Fallback inmediato si no hay clave API
+    if not GEMINI_KEY:
+        jerarquia = "Ley Orgánica" if re.search(r"org[aá]nica", titulo, re.I) else "Ley Ordinaria"
+        return {
+            "jerarquia": jerarquia,
+            "tematica": "Otro",
+            "sumario": f"Ley aprobada por la Asamblea Nacional del Ecuador: {titulo}",
+        }
+
     contenido = texto[:3000] if texto else f"Título: {titulo}"
     prompt = f"""Analiza esta ley ecuatoriana aprobada por la Asamblea Nacional.
 Responde SOLO con JSON válido, sin markdown ni texto extra.
@@ -272,28 +290,47 @@ def procesar_ley(ley):
     # Extraer texto del PDF
     texto = extraer_texto_pdf(ley.get("url_pdf"))
 
-    # Clasificar con Gemini
+    # Clasificar con Gemini (o fallback por título)
     c = clasificar(titulo, texto)
     arts = extraer_arts(texto)
 
+    # Determinar tipo y jerarquía numérica (schema v8 compatible)
+    tipo_texto = c.get("jerarquia", "Ley Ordinaria")  # "Ley Orgánica" o "Ley Ordinaria"
+    jerarquia_num = 3  # Leyes = jerarquía 3
+
+    # Código único: usar número RO o hash del título
+    num_ro = ley.get("numero_ro") or ""
+    num_digits = re.sub(r"[^\d]", "", num_ro)
+    fecha = ley.get("fecha") or ""
+    año = fecha[:4] if fecha else str(date.today().year)
+    if num_digits:
+        codigo = f"AN-{num_digits}-{año}"
+    else:
+        codigo = f"AN-LY{abs(hash(titulo)) % 10000:04d}-{año}"
+
     norma = {
-        "titulo":       titulo,
-        "numero_ro":    ley.get("numero_ro"),
-        "numero_norma": None,
-        "jerarquia":    c.get("jerarquia", "Ley Orgánica"),
-        "origen":       "Asamblea Nacional",
-        "tematica":     c.get("tematica", "Otro"),
-        "vigencia":     "Vigente",
-        "fecha_pub":    ley.get("fecha") or str(date.today()),
-        "url_pdf":      ley.get("url_pdf"),
-        "sumario":      c.get("sumario"),
-        "articulos":    arts if arts else None,
-        "metodo_ocr":   "asamblea_nacional",
+        "codigo_unico":       codigo,
+        "numero_ro":          num_ro or None,
+        "titulo":             titulo[:400],
+        "tipo":               tipo_texto,
+        "jerarquia":          jerarquia_num,
+        "jerarquia_nombre":   "Leyes Orgánicas" if "orgánica" in tipo_texto.lower() else "Leyes Ordinarias",
+        "fecha_publicacion":  ley.get("fecha") or None,  # NULL mejor que fecha incorrecta
+        "fecha_extraccion":   datetime.now().isoformat(),
+        "registro_oficial":   num_ro or None,
+        "fuente":             "Asamblea Nacional",
+        "url_fuente":         LEYES_URL,
+        "url_pdf":            ley.get("url_pdf"),
+        "resumen":            (c.get("sumario") or titulo)[:600],
+        "etiquetas":          ["asamblea-nacional", tipo_texto.lower().replace(" ", "-")],
+        "estado":             "vigente",
+        "activo":             True,
+        "verificado":         False,
     }
 
     try:
         sb_insert("normas", norma)
-        print(f"  ✓ [{norma['jerarquia']}] [{norma['tematica']}] {titulo[:50]}")
+        print(f"  ✓ [{tipo_texto}] {titulo[:50]}")
         return 1
     except Exception as e:
         print(f"  ✗ Error: {e}")

@@ -298,13 +298,16 @@ def verificar_norma(norma):
     }
 
 def actualizar_norma_en_supabase(norma_id, resultado):
-    """Actualiza la norma en Supabase con el resultado de verificación."""
+    """Actualiza la norma en Supabase con el resultado de verificación.
+    
+    IMPORTANTE: NO sobrescribir el campo 'resumen' — contiene el texto
+    original de la norma. Los detalles de verificación se loguean en consola.
+    """
     update_data = {
-        "verificado":   True,
-        "estado":       "vigente" if resultado["estado_verificacion"] != "desactualizada" else "vigente",
-        "resumen":      (resultado.get("detalles_verificacion") or "")[:600],
+        "verificado": True,
+        # 'estado' siempre vigente — el verificador no determina derogación
     }
-    # Si encontramos URL de PDF actualizado, actualizarlo
+    # Solo actualizar PDF si encontramos URL alternativa válida
     if resultado.get("url_pdf_nuevo"):
         update_data["url_pdf"] = resultado["url_pdf_nuevo"]
 
@@ -389,30 +392,29 @@ def main():
     # Check for truly broken PDFs (404) and log them
     print("\n🔗 Verificando PDFs rotos (404)...")
     broken = 0
-    for norma in normas[:50]:  # Check first 50 to avoid timeout
+    for norma in normas:  # Verificar todas (timeout del workflow maneja el límite)
         url = (norma.get("url_pdf") or "").strip()
         if url and not verificar_pdf_activo(url):
             broken += 1
             print(f"  🔴 PDF roto: {norma.get('titulo','')[:60]}")
             print(f"     URL: {url[:80]}")
-            # Mark as needing update
-            sb_patch("normas", norma["id"], {
-                "resumen": f"⚠️ PDF no disponible. URL original: {url[:200]}"
-            })
+            # Registrar en consola pero NO sobrescribir el resumen original
+            print(f"     (PDF no disponible — registrado en log)")
         time.sleep(0.2)
     print(f"  PDFs rotos encontrados: {broken}")
 
     # Log en Supabase
     total_issues = stats["posible_actualizacion"] + stats["desactualizada"]
-    sb_insert("extracciones", {
-        "fecha":    datetime.now().isoformat(),
-        "fuente":   "Verificador GitHub Actions",
-        "cantidad": stats["pdf_actualizado"],
-        "estado":   "exitoso",
-        "detalles": (f"Verificadas: {len(normas)} | "
-                    f"Al día: {stats['actualizada']} | "
-                    f"Con reformas: {total_issues} | "
-                    f"PDFs actualizados: {stats['pdf_actualizado']}"),
+    sb_insert("scraper_logs", {
+        "nivel":   "INFO",
+        "mensaje": f"Verificador — {stats['pdf_actualizado']} PDFs actualizados de {len(normas)} normas",
+        "detalle": {
+            "fecha":             datetime.now().isoformat(),
+            "normas_verificadas": len(normas),
+            "actualizadas":      stats["actualizada"],
+            "con_reformas":      total_issues,
+            "pdfs_actualizados": stats["pdf_actualizado"],
+        },
     })
 
 if __name__ == "__main__":
